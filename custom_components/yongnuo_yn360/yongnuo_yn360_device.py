@@ -125,6 +125,12 @@ class YongnuoYn360Device:
                 try:
                     await self._send_with_policy(cmd.packet, seq=cmd.seq)
                     _LOGGER.debug("Sent command to %s (%s)", self.address, cmd.reason)
+
+                    # Release BLE ownership as soon as turn_off is delivered,
+                    # so phone apps can reconnect immediately.
+                    if cmd.reason == "turn_off":
+                        await self._disconnect_client()
+                        _LOGGER.debug("Disconnected BLE after turn_off for %s", self.address)
                 except Exception as err:
                     # If newer command exists, stale command errors are ignored.
                     if self._has_newer_command(cmd.seq) or self._wake_event.is_set():
