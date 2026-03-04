@@ -15,11 +15,13 @@ HACS is a community store for Home Assistant. Add this repository to HACS and in
 - Power on/off
 - RGB color control
 - Full config flow with auto-discovery
-- High-frequency-safe command pipeline (serialized BLE writes + latest-command coalescing)
+- Persistent BLE connection per light for fast control
+- High-speed-safe command pipeline (serialized BLE writes + latest-command coalescing)
 - Multi-light support (add one config entry per light)
+- Retry policy tuned for speed: burst updates do not retry; low-speed final command retries
 
-The device is not paired to your Home Assistant instance. Commands are sent over short BLE sessions.
 For rapid changes (scripts/scenes), writes are serialized per device and only the latest pending command is kept to avoid command pile-up.
+During high-speed changes, stale retries are skipped. When control slows down, the final command can retry for reliability.
 
 ## Requirements
 

@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import logging
+import contextlib
 from dataclasses import dataclass
 
 from bleak import BleakClient
@@ -21,12 +22,13 @@ class PendingCommand:
 
 
 class YongnuoYn360Device:
-    """YN360 BLE transport with command coalescing + serialized writes.
+    """YN360 BLE transport with persistent connection + high-speed coalescing.
 
-    Why:
-    - HA automations/scenes may toggle a light quickly.
-    - BLE writes cannot be safely parallelized for one peripheral.
-    - Keeping only the latest pending command avoids stale writes backlog.
+    Design goals:
+    - Persistent BLE connection per device (fast repeated writes).
+    - Keep only latest pending command (drop stale intermediate states).
+    - High-speed burst: no retry.
+    - Low-speed final command: retry enabled.
     """
 
     def __init__(self, hass: HomeAssistant, address: str):
@@ -35,95 +37,182 @@ class YongnuoYn360Device:
 
         self._worker_task: asyncio.Task | None = None
         self._wake_event = asyncio.Event()
-        self._send_lock = asyncio.Lock()
         self._pending: PendingCommand | None = None
 
-        # Small pacing to avoid hammering BLE stack under burst updates.
-        self._min_send_interval = 0.08
+        self._client: BleakClient | None = None
+        self._ble_device = None
+        self._conn_lock = asyncio.Lock()
+
+        # High-speed tuning
+        self._coalesce_window = 0.02  # merge ultra-fast updates
+        self._min_send_interval = 0.01  # pace writes lightly
+
+        # Retry strategy: only low-speed/final command gets retries.
+        self._idle_retry_threshold = 0.22
+        self._last_enqueue_ts = 0.0
+
+        # Keep persistent connection while active; release after idle.
+        self._idle_disconnect_seconds = 12.0
+        self._idle_disconnect_task: asyncio.Task | None = None
 
     async def async_shutdown(self) -> None:
         if self._worker_task and not self._worker_task.done():
             self._worker_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._worker_task
-            except asyncio.CancelledError:
-                pass
+
+        if self._idle_disconnect_task and not self._idle_disconnect_task.done():
+            self._idle_disconnect_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._idle_disconnect_task
+
+        await self._disconnect_client()
 
     def _start_worker_if_needed(self) -> None:
         if self._worker_task is None or self._worker_task.done():
             self._worker_task = asyncio.create_task(self._worker(), name=f"yn360-worker-{self.address}")
+
+    def _touch_idle_timer(self) -> None:
+        if self._idle_disconnect_task and not self._idle_disconnect_task.done():
+            self._idle_disconnect_task.cancel()
+        self._idle_disconnect_task = asyncio.create_task(self._idle_disconnect_watchdog())
+
+    async def _idle_disconnect_watchdog(self) -> None:
+        try:
+            await asyncio.sleep(self._idle_disconnect_seconds)
+            await self._disconnect_client()
+        except asyncio.CancelledError:
+            raise
+
+    def _enqueue_latest(self, packet: bytes, reason: str) -> None:
+        self._pending = PendingCommand(packet=packet, reason=reason)
+        self._last_enqueue_ts = asyncio.get_running_loop().time()
+        self._start_worker_if_needed()
+        self._wake_event.set()
 
     async def _worker(self) -> None:
         while True:
             await self._wake_event.wait()
             self._wake_event.clear()
 
+            # Tiny coalescing window to keep only most recent command.
+            await asyncio.sleep(self._coalesce_window)
+
             while self._pending is not None:
                 cmd = self._pending
                 self._pending = None
-                try:
-                    await self._connect_and_send(cmd.packet)
-                    _LOGGER.debug("Sent command to %s (%s): %s", self.address, cmd.reason, cmd.packet.hex())
-                except Exception as err:
-                    # If this failed but a newer command is already pending, keep moving.
-                    if self._pending is None:
-                        _LOGGER.warning("Command failed for %s (%s): %s", self.address, cmd.reason, err)
-                        raise
-                    _LOGGER.debug(
-                        "Command failed for %s but newer command exists, skipping stale failure: %s",
-                        self.address,
-                        err,
-                    )
 
+                now = asyncio.get_running_loop().time()
+                idle_for = now - self._last_enqueue_ts
+                allow_retry = idle_for >= self._idle_retry_threshold
+
+                try:
+                    await self._send_with_policy(cmd.packet, allow_retry=allow_retry)
+                    _LOGGER.debug(
+                        "Sent command to %s (%s), allow_retry=%s",
+                        self.address,
+                        cmd.reason,
+                        allow_retry,
+                    )
+                except Exception as err:
+                    # If newer command exists, stale command errors are ignored.
+                    if self._pending is not None or self._wake_event.is_set():
+                        _LOGGER.debug(
+                            "Stale command failed for %s but newer command pending: %s",
+                            self.address,
+                            err,
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "Command failed for %s (%s): %s",
+                            self.address,
+                            cmd.reason,
+                            err,
+                        )
+
+                self._touch_idle_timer()
                 await asyncio.sleep(self._min_send_interval)
 
-    def _enqueue_latest(self, packet: bytes, reason: str) -> None:
-        self._pending = PendingCommand(packet=packet, reason=reason)
-        self._start_worker_if_needed()
-        self._wake_event.set()
-
     async def _resolve_ble_device(self):
+        if self._ble_device is not None:
+            return self._ble_device
+
         ble_device = async_ble_device_from_address(self.hass, self.address, connectable=True)
         if ble_device:
-            return ble_device
+            self._ble_device = ble_device
+            return self._ble_device
 
-        _LOGGER.debug("No BLE device resolved via async_ble_device_from_address")
         for info in async_discovered_service_info(self.hass):
             if info.address == self.address:
+                self._ble_device = info.device
                 _LOGGER.info("Resolved device from fallback discovery: %s", info.device)
-                return info.device
+                return self._ble_device
 
         return None
 
-    async def _connect_and_send(self, data: bytes) -> None:
-        async with self._send_lock:
+    async def _ensure_connected(self) -> BleakClient:
+        async with self._conn_lock:
+            if self._client and self._client.is_connected:
+                return self._client
+
             ble_device = await self._resolve_ble_device()
             if not ble_device:
                 raise RuntimeError(f"BLE device {self.address} not found or not connectable")
 
-            # Short retries: high-frequency control should fail fast and let newer command win.
-            retry_delays = (0.05, 0.15, 0.35)
-            last_error: Exception | None = None
+            client = BleakClient(ble_device, timeout=4.0)
+            await client.connect()
+            self._client = client
+            return client
 
-            for idx, delay in enumerate((*retry_delays, None), start=1):
-                try:
-                    async with BleakClient(ble_device, timeout=4.0) as client:
-                        await client.write_gatt_char(CHARACTERISTIC_UUID, data, response=False)
-                        return
-                except Exception as err:
-                    last_error = err
-                    if delay is None:
-                        break
+    async def _disconnect_client(self) -> None:
+        async with self._conn_lock:
+            if self._client is None:
+                return
+            try:
+                if self._client.is_connected:
+                    await self._client.disconnect()
+            finally:
+                self._client = None
+
+    async def _send_once(self, data: bytes) -> None:
+        client = await self._ensure_connected()
+        try:
+            await client.write_gatt_char(CHARACTERISTIC_UUID, data, response=False)
+        except Exception:
+            # Connection may be stale; reconnect once and rethrow to policy.
+            await self._disconnect_client()
+            raise
+
+    async def _send_with_policy(self, data: bytes, allow_retry: bool) -> None:
+        # High-speed mode: send once, no retries.
+        if not allow_retry:
+            await self._send_once(data)
+            return
+
+        # Low-speed/final command mode: retry the last command only.
+        retry_delays = (0.12, 0.25, 0.45)
+        last_error: Exception | None = None
+
+        for delay in (*retry_delays, None):
+            try:
+                await self._send_once(data)
+                return
+            except Exception as err:
+                last_error = err
+
+                # If a new command appears, stop retrying stale command immediately.
+                if self._pending is not None or self._wake_event.is_set():
                     _LOGGER.debug(
-                        "Connection attempt %d failed for %s: %s (retrying in %.2fs)",
-                        idx,
+                        "Abort retries for %s because newer command arrived",
                         self.address,
-                        err,
-                        delay,
                     )
-                    await asyncio.sleep(delay)
+                    return
 
-            raise RuntimeError(f"Failed to send to {self.address}: {last_error}")
+                if delay is None:
+                    break
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(f"Failed to send final command to {self.address}: {last_error}")
 
     async def set_color(self, r: int, g: int, b: int, brightness: int):
         r = min(max(int(r * (brightness / 100)), 0), 255)
