@@ -9,8 +9,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-def remap_brightness(value):
+
+def remap_brightness(value: int) -> int:
     return max(1, min(100, round((value / 255) * 100)))
+
 
 class YongnuoLight(LightEntity):
     _attr_has_entity_name = True
@@ -54,24 +56,20 @@ class YongnuoLight(LightEntity):
             "via_device": None,
         }
 
-
     async def async_turn_on(self, **kwargs):
         r, g, b = self._rgb_color
-        brightness = remap_brightness(self._brightness)
+        brightness_pct = remap_brightness(self._brightness)
 
         if ATTR_RGB_COLOR in kwargs:
             r, g, b = kwargs[ATTR_RGB_COLOR]
             self._rgb_color = (r, g, b)
+
         if ATTR_BRIGHTNESS in kwargs:
-            brightness = remap_brightness(kwargs[ATTR_BRIGHTNESS])
             self._brightness = kwargs[ATTR_BRIGHTNESS]
+            brightness_pct = remap_brightness(self._brightness)
 
         self._is_on = True
-        self._rgb_color = kwargs.get(ATTR_RGB_COLOR, self._rgb_color)
-        self._brightness = kwargs.get(ATTR_BRIGHTNESS, self._brightness)
-        self._is_on = True
-
-        await self._device.set_color(r, g, b, brightness)
+        await self._device.set_color(r, g, b, brightness_pct)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
@@ -79,6 +77,14 @@ class YongnuoLight(LightEntity):
         self._is_on = False
         self.async_write_ha_state()
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback):
+    async def async_will_remove_from_hass(self) -> None:
+        await self._device.async_shutdown()
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+):
     address = entry.data["address"]
     async_add_entities([YongnuoLight(hass, address)])
