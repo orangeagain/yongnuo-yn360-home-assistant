@@ -1,7 +1,7 @@
 import asyncio
-import struct
-import logging
 import contextlib
+import logging
+import struct
 from dataclasses import dataclass
 
 from bleak import BleakClient
@@ -19,6 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 class PendingCommand:
     packet: bytes
     reason: str
+    seq: int
 
 
 class YongnuoYn360Device:
@@ -47,9 +48,13 @@ class YongnuoYn360Device:
         self._coalesce_window = 0.02  # merge ultra-fast updates
         self._min_send_interval = 0.01  # pace writes lightly
 
-        # Retry strategy: only low-speed/final command gets retries.
-        self._idle_retry_threshold = 0.22
-        self._last_enqueue_ts = 0.0
+        # Retry strategy:
+        # - During high-speed command stream: no retry.
+        # - Retry only when this command stays the latest for a quiet window.
+        self._retry_quiet_window = 0.22
+
+        # Sequence number for detecting newer commands.
+        self._seq = 0
 
         # Keep persistent connection while active; release after idle.
         self._idle_disconnect_seconds = 12.0
@@ -85,10 +90,25 @@ class YongnuoYn360Device:
             raise
 
     def _enqueue_latest(self, packet: bytes, reason: str) -> None:
-        self._pending = PendingCommand(packet=packet, reason=reason)
-        self._last_enqueue_ts = asyncio.get_running_loop().time()
+        self._seq += 1
+        self._pending = PendingCommand(packet=packet, reason=reason, seq=self._seq)
         self._start_worker_if_needed()
         self._wake_event.set()
+
+    def _has_newer_command(self, seq: int) -> bool:
+        return self._pending is not None and self._pending.seq > seq
+
+    async def _wait_for_quiet_window(self, seq: int) -> bool:
+        """Return True when no newer command arrives during quiet window."""
+        step = 0.02
+        waited = 0.0
+        while waited < self._retry_quiet_window:
+            if self._has_newer_command(seq):
+                return False
+            sleep_for = min(step, self._retry_quiet_window - waited)
+            await asyncio.sleep(sleep_for)
+            waited += sleep_for
+        return not self._has_newer_command(seq)
 
     async def _worker(self) -> None:
         while True:
@@ -102,21 +122,12 @@ class YongnuoYn360Device:
                 cmd = self._pending
                 self._pending = None
 
-                now = asyncio.get_running_loop().time()
-                idle_for = now - self._last_enqueue_ts
-                allow_retry = idle_for >= self._idle_retry_threshold
-
                 try:
-                    await self._send_with_policy(cmd.packet, allow_retry=allow_retry)
-                    _LOGGER.debug(
-                        "Sent command to %s (%s), allow_retry=%s",
-                        self.address,
-                        cmd.reason,
-                        allow_retry,
-                    )
+                    await self._send_with_policy(cmd.packet, seq=cmd.seq)
+                    _LOGGER.debug("Sent command to %s (%s)", self.address, cmd.reason)
                 except Exception as err:
                     # If newer command exists, stale command errors are ignored.
-                    if self._pending is not None or self._wake_event.is_set():
+                    if self._has_newer_command(cmd.seq) or self._wake_event.is_set():
                         _LOGGER.debug(
                             "Stale command failed for %s but newer command pending: %s",
                             self.address,
@@ -179,38 +190,43 @@ class YongnuoYn360Device:
         try:
             await client.write_gatt_char(CHARACTERISTIC_UUID, data, response=False)
         except Exception:
-            # Connection may be stale; reconnect once and rethrow to policy.
+            # Connection may be stale; reconnect on next send.
             await self._disconnect_client()
             raise
 
-    async def _send_with_policy(self, data: bytes, allow_retry: bool) -> None:
-        # High-speed mode: send once, no retries.
-        if not allow_retry:
+    async def _send_with_policy(self, data: bytes, seq: int) -> None:
+        # Always try once immediately.
+        try:
             await self._send_once(data)
             return
+        except Exception as first_error:
+            last_error: Exception | None = first_error
 
-        # Low-speed/final command mode: retry the last command only.
-        retry_delays = (0.12, 0.25, 0.45)
-        last_error: Exception | None = None
+        # If new commands are already queued, this is high-speed stream: do not retry.
+        if self._has_newer_command(seq) or self._wake_event.is_set():
+            _LOGGER.debug("Skip retry for %s due to newer command", self.address)
+            return
 
-        for delay in (*retry_delays, None):
+        # Retry only if this command stays the latest for a quiet window.
+        quiet = await self._wait_for_quiet_window(seq)
+        if not quiet:
+            _LOGGER.debug("Skip retry for %s; command stream still active", self.address)
+            return
+
+        # Low-speed/final command mode: retry this latest command.
+        for delay in (0.0, 0.12, 0.25, 0.45):
+            if self._has_newer_command(seq) or self._wake_event.is_set():
+                _LOGGER.debug("Abort retries for %s because newer command arrived", self.address)
+                return
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+
             try:
                 await self._send_once(data)
                 return
             except Exception as err:
                 last_error = err
-
-                # If a new command appears, stop retrying stale command immediately.
-                if self._pending is not None or self._wake_event.is_set():
-                    _LOGGER.debug(
-                        "Abort retries for %s because newer command arrived",
-                        self.address,
-                    )
-                    return
-
-                if delay is None:
-                    break
-                await asyncio.sleep(delay)
 
         raise RuntimeError(f"Failed to send final command to {self.address}: {last_error}")
 
