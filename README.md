@@ -15,23 +15,56 @@ HACS is a community store for Home Assistant. Add this repository to HACS and in
 - Power on/off
 - RGB color control
 - Full config flow with auto-discovery
-- Persistent BLE connection per light for fast control
-- High-speed-safe command pipeline (serialized BLE writes + latest-command coalescing)
+- Persistent BLE connection per light (low latency for repeated updates)
+- High-speed command coalescing (only latest command is kept)
 - Multi-light support (add one config entry per light)
-- Retry policy tuned for speed: burst updates do not retry; low-speed final command retries
+- Adaptive retry policy optimized for speed and stability
 
-For rapid changes (scripts/scenes), writes are serialized per device and only the latest pending command is kept to avoid command pile-up.
-During high-speed changes, stale retries are skipped. When control slows down, the final command can retry for reliability.
+## High-speed mode architecture
+
+This integration now uses a per-device command worker:
+
+- **One worker per light**: each configured MAC address has an independent command pipeline.
+- **Persistent BLE session per light**: avoids reconnecting on every single command.
+- **Serialized writes per light**: prevents command races and out-of-order writes.
+- **Latest-command wins**: during rapid changes, intermediate commands are dropped so the light converges quickly to the newest state.
+
+This is designed for fast scene transitions, slider drags, and high-frequency automations.
+
+## Retry behavior (important)
+
+Retry strategy is intentionally asymmetric:
+
+- Every command is attempted once immediately.
+- If command traffic is still active (newer command appears), retries are skipped.
+- A command is retried **only if it remains the latest command** for a quiet window.
+- If a newer command arrives while retrying, retries for the older command are aborted immediately.
+
+In short:
+
+- **High-speed changes** -> no retry (favor responsiveness)
+- **Low-speed final state** -> retry enabled (favor reliability)
+
+## Multi-light behavior
+
+Run "Add Integration" repeatedly and select/enter each light MAC address.
+Each configured address becomes an independent Home Assistant light entity.
+
+For setups like 3 lights:
+
+- Lights operate in parallel across devices.
+- Within each single light, writes remain serialized for correctness.
+
+## Performance notes and limits
+
+- Real-world throughput depends on BLE radio quality, interference, and proxy/adapter capabilities.
+- If many BLE devices share one adapter, peak update rate may be constrained by the adapter.
+- Persistent connections are released after an idle period to reduce background BLE load.
 
 ## Requirements
 
 - Bluetooth is available in Home Assistant instance (either directly or by proxy)
 - Home Assistant 2025.7+
-
-## Multiple lights
-
-Run "Add Integration" repeatedly and select/enter each light MAC address.
-Each configured address becomes an independent Home Assistant light entity.
 
 ## Acknowledgments
 
