@@ -19,6 +19,7 @@ HACS is a community store for Home Assistant. Add this repository to HACS and in
 - High-speed command coalescing (only latest command is kept)
 - Multi-light support (add one config entry per light)
 - Adaptive retry policy optimized for speed and stability
+- On turn_off, immediately releases BLE connection so mobile apps can take over quickly
 
 ## High-speed mode architecture
 
@@ -54,6 +55,15 @@ For setups like 3 lights:
 
 - Lights operate in parallel across devices.
 - Within each single light, writes remain serialized for correctness.
+
+## Mobile coexistence
+
+To support smoother handoff between Home Assistant and mobile app control:
+
+- After a successful `turn_off` command, this integration disconnects BLE immediately.
+- On the next `turn_on`/color command from Home Assistant, it reconnects automatically.
+
+This allows your phone app to reclaim the BLE link faster after Home Assistant turns the light off.
 
 ## Performance notes and limits
 
