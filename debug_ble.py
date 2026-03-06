@@ -7,12 +7,8 @@ Usage:
   python debug_ble.py sniff ADDRESS     # Subscribe to all notify/indicate characteristics
   python debug_ble.py write ADDRESS UUID HEX  # Write raw hex bytes to a characteristic
   python debug_ble.py probe ADDRESS     # Try command types A0-AF interactively
-  python debug_ble.py probe-ct ADDRESS  # Probe color-temperature commands (YN150WY)
-  python debug_ble.py auto-test ADDRESS  # Auto-test: color temp + RGB (combined)
-  python debug_ble.py auto-rgb ADDRESS  # Auto-test RGB colors only
-  python debug_ble.py auto-ct ADDRESS   # Auto-test color temperature only
-  python debug_ble.py speed-test ADDRESS # BLE speed benchmark (throughput + latency)
-  python debug_ble.py rainbow ADDRESS    # Visual FPS test: find the real frame rate limit
+  python debug_ble.py rainbow ADDRESS [FPS,FPS,...]  # Visual FPS test: find the real frame rate limit
+  python debug_ble.py parallel ADDR,MODE,FPS [ADDR,MODE,FPS ...]  # Multi-light parallel test
 
 Examples:
   python debug_ble.py scan
@@ -20,9 +16,8 @@ Examples:
   python debug_ble.py sniff AA:BB:CC:DD:EE:FF
   python debug_ble.py write AA:BB:CC:DD:EE:FF f000aa61-0451-4000-b000-000000000000 AEA1FF000056
   python debug_ble.py probe AA:BB:CC:DD:EE:FF
-  python debug_ble.py auto-test DB:B9:85:86:42:60   # YN150 Ultra RGB (full test)
-  python debug_ble.py auto-rgb DB:B9:85:86:42:60    # YN150 Ultra RGB (RGB only)
-  python debug_ble.py auto-ct D0:32:34:39:74:49     # YN150WY (color temp only)
+  python debug_ble.py rainbow DB:B9:85:86:42:60 200,300,400,500
+  python debug_ble.py parallel DB:B9:85:86:42:60,rgb,300 D0:32:34:39:6D:6F,rgb,300 D0:32:34:39:74:49,ct,100
 """
 
 import asyncio
@@ -121,8 +116,7 @@ CHAR_CMD = "f000aa61-0451-4000-b000-000000000000"
 CHAR_NOTIFY = "f000aa63-0451-4000-b000-000000000000"
 
 
-async def cmd_probe_ct(address: str):
-    """Probe color-temperature commands on YN150WY-style lights."""
+async def cmd_rainbow(address: str, fps_list: list[int] | None = None):
     print(f"Connecting to {address} ...")
     async with BleakClient(address, timeout=10.0) as client:
         print(f"Connected: {client.is_connected}")
@@ -1160,6 +1154,182 @@ async def cmd_rainbow(address: str, fps_list: list[int] | None = None):
         print("  Light off. Done.")
 
 
+async def cmd_parallel(lights_config: list[tuple[str, str, int]]):
+    """Parallel multi-light test with interleaved heap scheduler.
+
+    Connects to multiple lights simultaneously, sends commands interleaved
+    by a priority queue (earliest-deadline-first), then uses buffer drain
+    (OFF marker) to detect if any light fell behind.
+
+    Each light entry: (address, mode, fps) where mode is 'rgb' or 'ct'.
+    """
+    import heapq
+    import time
+
+    SEND_DURATION = 3.0
+    STRIPE_FRAMES = 15  # frames per color block
+
+    def busy_wait_until(target: float):
+        while time.perf_counter() < target:
+            pass
+
+    RED = bytes([0xAE, 0xA1, 0xFF, 0x00, 0x00, 0x56])
+    BLUE = bytes([0xAE, 0xA1, 0x00, 0x00, 0xFF, 0x56])
+    GREEN = bytes([0xAE, 0xA1, 0x00, 0xFF, 0x00, 0x56])
+    CT_COOL = bytes([0xAE, 0xAA, 0x00, 0x63, 0x00, 0x56])  # cool white max
+    CT_WARM = bytes([0xAE, 0xAA, 0x00, 0x00, 0x63, 0x56])  # warm white max
+    OFF = bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56])
+
+    def make_rgb_stripe(frame):
+        return RED if (frame // STRIPE_FRAMES) % 2 == 0 else BLUE
+
+    def make_ct_stripe(frame):
+        return CT_COOL if (frame // STRIPE_FRAMES) % 2 == 0 else CT_WARM
+
+    # ── Connect to all lights ──
+    print(f"\nConnecting to {len(lights_config)} lights...")
+    clients = []
+    lights = []
+    try:
+        for addr, mode, fps in lights_config:
+            label = f"{'RGB' if mode == 'rgb' else 'CT'} @ {fps}fps"
+            print(f"  {addr}  ({label})...", end="", flush=True)
+            client = BleakClient(addr, timeout=10.0)
+            await client.connect()
+            print(" OK")
+            clients.append(client)
+
+            total = int(fps * SEND_DURATION)
+            lights.append({
+                "client": client,
+                "addr": addr,
+                "mode": mode,
+                "fps": fps,
+                "total": total,
+                "interval": 1.0 / fps,
+                "make_packet": make_rgb_stripe if mode == "rgb" else make_ct_stripe,
+            })
+
+        # ── Turn all on ──
+        print("\nTurning all lights ON...")
+        for light in lights:
+            await light["client"].write_gatt_char(
+                CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
+        await asyncio.sleep(1.0)
+
+        # ── Print test plan ──
+        total_cmds = sum(l["total"] for l in lights)
+        combined_fps = sum(l["fps"] for l in lights)
+        print()
+        print("=" * 64)
+        print("  Parallel Multi-Light Test")
+        print(f"  Duration: {SEND_DURATION:.0f}s  |  Combined: {combined_fps} cmd/s")
+        print("=" * 64)
+        for i, light in enumerate(lights):
+            print(f"  Light {i+1}: {light['addr']}")
+            print(f"           {light['mode'].upper()} @ {light['fps']} fps"
+                  f" ({light['total']} commands)")
+        print(f"  Total: {total_cmds} commands")
+        print()
+        print("  After sending, OFF is sent to all lights.")
+        print("  If a light keeps flickering after 'OFF sent' -> buffer backlog.")
+        print("=" * 64)
+
+        input("\n  Press Enter to start...")
+
+        # ── Interleaved heap scheduler ──
+        # Heap entries: (scheduled_time, light_index, frame_number)
+        heap: list[tuple[float, int, int]] = []
+        t_start = time.perf_counter()
+        for i in range(len(lights)):
+            heapq.heappush(heap, (t_start, i, 0))
+
+        errors = [0] * len(lights)
+        sent = [0] * len(lights)
+
+        while heap:
+            next_time, idx, frame = heapq.heappop(heap)
+            light = lights[idx]
+
+            if frame >= light["total"]:
+                continue
+
+            busy_wait_until(next_time)
+
+            packet = light["make_packet"](frame)
+            try:
+                await light["client"].write_gatt_char(CHAR_CMD, packet, response=False)
+                sent[idx] += 1
+            except Exception as e:
+                errors[idx] += 1
+                if errors[idx] <= 3:
+                    print(f"\n    error light {idx+1}: {e}")
+
+            # Schedule next frame for this light
+            heapq.heappush(heap, (next_time + light["interval"], idx, frame + 1))
+
+        t_send_done = time.perf_counter()
+        send_elapsed = t_send_done - t_start
+
+        # ── Send OFF to all ──
+        for light in lights:
+            await light["client"].write_gatt_char(CHAR_CMD, OFF, response=False)
+        t_off_sent = time.perf_counter()
+
+        # ── Report sending stats ──
+        actual_total = sum(sent)
+        print(f"\n{'─'*64}")
+        print(f"  Sending complete: {actual_total} commands in {send_elapsed:.2f}s"
+              f" = {actual_total/send_elapsed:.0f} cmd/s")
+        if send_elapsed > SEND_DURATION * 1.1:
+            print(f"  WARNING: took {send_elapsed:.1f}s instead of {SEND_DURATION:.0f}s"
+                  f" - sender couldn't keep up!")
+        print()
+
+        for i, light in enumerate(lights):
+            afps = sent[i] / send_elapsed if send_elapsed > 0 else 0
+            status = "OK" if sent[i] == light["total"] else "BEHIND"
+            print(f"  Light {i+1} ({light['addr']}):"
+                  f"  {sent[i]}/{light['total']} sent"
+                  f"  {afps:.0f}/{light['fps']} fps"
+                  f"  errors={errors[i]}  [{status}]")
+
+        # ── Buffer drain observation ──
+        print(f"\n{'─'*64}")
+        print(f"  >>> OFF sent to all lights <<<")
+        print(f"  >>> Press Enter when LAST light turns off <<<")
+        input()
+        t_off_seen = time.perf_counter()
+        drain = t_off_seen - t_off_sent
+
+        print(f"\n{'='*64}")
+        print("  RESULT")
+        print(f"{'='*64}")
+        if drain < 1.0:
+            print(f"  Drain: {drain:.1f}s (immediate)")
+            print(f"  -> All {len(lights)} lights handle {combined_fps} cmd/s combined!")
+        else:
+            adj_drain = max(0, drain - 0.3)
+            effective = actual_total / (send_elapsed + adj_drain)
+            print(f"  Drain: {drain:.1f}s (adjusted ~{adj_drain:.1f}s)")
+            print(f"  -> Combined effective: ~{effective:.0f} cmd/s"
+                  f" (target {combined_fps})")
+            if effective < combined_fps * 0.9:
+                print(f"  -> Bottleneck: BLE radio bandwidth shared across"
+                      f" {len(lights)} connections")
+
+    finally:
+        print("\n  Disconnecting...")
+        for client in clients:
+            try:
+                if client.is_connected:
+                    await client.write_gatt_char(CHAR_CMD, OFF, response=False)
+                    await client.disconnect()
+            except Exception:
+                pass
+        print("  Done.")
+
+
 async def cmd_probe(address: str):
     """Try each command type AE Ax with sample payloads, wait for user feedback."""
     print(f"Connecting to {address} ...")
@@ -1314,6 +1484,35 @@ def main():
         if len(sys.argv) >= 4:
             fps_list = [int(x) for x in sys.argv[3].split(",")]
         asyncio.run(cmd_rainbow(sys.argv[2], fps_list))
+    elif command == "parallel":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py parallel ADDR,MODE,FPS [ADDR,MODE,FPS ...]")
+            print("  MODE: rgb or ct")
+            print("  e.g.: debug_ble.py parallel DB:B9:85:86:42:60,rgb,300"
+                  " D0:32:34:39:74:49,ct,100")
+            sys.exit(1)
+        import re
+        ble_addr_re = re.compile(r'^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
+        lights_config = []
+        for arg in sys.argv[2:]:
+            # Last two comma-separated fields are mode and fps
+            parts = arg.rsplit(",", 2)
+            if len(parts) != 3:
+                print(f"Invalid format: {arg}")
+                print("Expected: ADDRESS,MODE,FPS  (e.g. DB:B9:85:86:42:60,rgb,300)")
+                sys.exit(1)
+            addr, mode, fps_str = parts
+            if not ble_addr_re.match(addr):
+                print(f"Invalid BLE address: '{addr}'")
+                print(f"  (from argument: {arg})")
+                print(f"  Check that each argument is separated by a space.")
+                sys.exit(1)
+            mode = mode.lower()
+            if mode not in ("rgb", "ct"):
+                print(f"Unknown mode '{mode}'. Use 'rgb' or 'ct'.")
+                sys.exit(1)
+            lights_config.append((addr, mode, int(fps_str)))
+        asyncio.run(cmd_parallel(lights_config))
     else:
         print(f"Unknown command: {command}")
         print(__doc__)
