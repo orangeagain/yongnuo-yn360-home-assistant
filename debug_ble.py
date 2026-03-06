@@ -8,8 +8,11 @@ Usage:
   python debug_ble.py write ADDRESS UUID HEX  # Write raw hex bytes to a characteristic
   python debug_ble.py probe ADDRESS     # Try command types A0-AF interactively
   python debug_ble.py probe-ct ADDRESS  # Probe color-temperature commands (YN150WY)
-  python debug_ble.py auto-rgb ADDRESS  # Auto-test RGB colors (YN150 Ultra RGB / YN360)
-  python debug_ble.py auto-ct ADDRESS   # Auto-test color temperature (YN150WY + YN360)
+  python debug_ble.py auto-test ADDRESS  # Auto-test: color temp + RGB (combined)
+  python debug_ble.py auto-rgb ADDRESS  # Auto-test RGB colors only
+  python debug_ble.py auto-ct ADDRESS   # Auto-test color temperature only
+  python debug_ble.py speed-test ADDRESS # BLE speed benchmark (throughput + latency)
+  python debug_ble.py rainbow ADDRESS    # Visual FPS test: find the real frame rate limit
 
 Examples:
   python debug_ble.py scan
@@ -17,8 +20,9 @@ Examples:
   python debug_ble.py sniff AA:BB:CC:DD:EE:FF
   python debug_ble.py write AA:BB:CC:DD:EE:FF f000aa61-0451-4000-b000-000000000000 AEA1FF000056
   python debug_ble.py probe AA:BB:CC:DD:EE:FF
-  python debug_ble.py auto-rgb DB:B9:85:86:42:60   # YN150 Ultra RGB
-  python debug_ble.py auto-ct D0:32:34:39:74:49     # YN150WY
+  python debug_ble.py auto-test DB:B9:85:86:42:60   # YN150 Ultra RGB (full test)
+  python debug_ble.py auto-rgb DB:B9:85:86:42:60    # YN150 Ultra RGB (RGB only)
+  python debug_ble.py auto-ct D0:32:34:39:74:49     # YN150WY (color temp only)
 """
 
 import asyncio
@@ -549,40 +553,74 @@ async def cmd_probe_ct_ch(address: str):
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
         await asyncio.sleep(1.5)
 
-        # Scan all channel bytes, alternating full cool/warm with max values
-        print("\n=== Scanning AE AA [ch] — cool(FF,00) vs warm(00,FF) ===")
-        print("Watch for any change. Ctrl+C to stop.\n")
+        # Phase 1: scan all channel bytes with CW=99 WW=0 (should go cool white)
+        print("\n=== Phase 1: AE AA [ch] 63 00 56 (cool white max) ===")
+        print("Watch for the light to change to COOL white. Ctrl+C when you see a change.\n")
+        sent_log = []
         try:
             for ch in range(256):
-                p1 = bytes([0xAE, 0xAA, ch, 0xFF, 0x00, 0x56])
-                print(f"  ch=0x{ch:02X} cool  {hex_dump(p1)}")
-                await client.write_gatt_char(CHAR_CMD, p1, response=False)
-                await asyncio.sleep(0.08)
-                p2 = bytes([0xAE, 0xAA, ch, 0x00, 0xFF, 0x56])
-                print(f"  ch=0x{ch:02X} warm  {hex_dump(p2)}")
-                await client.write_gatt_char(CHAR_CMD, p2, response=False)
-                await asyncio.sleep(0.08)
+                packet = bytes([0xAE, 0xAA, ch, 0x63, 0x00, 0x56])
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                line = f"  [{ts}] ch=0x{ch:02X}  {hex_dump(packet)}"
+                print(line)
+                sent_log.append(line)
+                await client.write_gatt_char(CHAR_CMD, packet, response=False)
+                await asyncio.sleep(0.3)
         except KeyboardInterrupt:
             print(f"\n*** Stopped at ch=0x{ch:02X} ***")
-            input("Press Enter to continue...")
+            print(f"--- Last 5 commands before Ctrl+C ---")
+            for l in sent_log[-5:]:
+                print(l)
+            input("\nPress Enter to continue to Phase 2...")
+
+        # Reset: turn on again
+        await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
+        await asyncio.sleep(1.5)
+
+        # Phase 2: scan all channel bytes with CW=0 WW=99 (should go warm white)
+        print("\n=== Phase 2: AE AA [ch] 00 63 56 (warm white max) ===")
+        print("Watch for the light to change to WARM white. Ctrl+C when you see a change.\n")
+        sent_log = []
+        try:
+            for ch in range(256):
+                packet = bytes([0xAE, 0xAA, ch, 0x00, 0x63, 0x56])
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                line = f"  [{ts}] ch=0x{ch:02X}  {hex_dump(packet)}"
+                print(line)
+                sent_log.append(line)
+                await client.write_gatt_char(CHAR_CMD, packet, response=False)
+                await asyncio.sleep(0.3)
+        except KeyboardInterrupt:
+            print(f"\n*** Stopped at ch=0x{ch:02X} ***")
+            print(f"--- Last 5 commands before Ctrl+C ---")
+            for l in sent_log[-5:]:
+                print(l)
+            input("\nPress Enter to continue to Phase 3...")
 
         # Reset
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
-        # Scan all command bytes (not just AA)
-        print("\n=== Scanning AE [cmd] — try all cmd bytes with 02 FF 00 ===")
-        print("Ctrl+C to stop.\n")
+        # Phase 3: try different command bytes (not just AA) with channel=0x02
+        print("\n=== Phase 3: AE [cmd] 02 63 00 56 (try other cmd bytes, ch=0x02) ===")
+        print("Ctrl+C when you see a change.\n")
+        sent_log = []
         try:
             for cmd in range(256):
                 if cmd in (0xA1, 0xA3):
                     continue
-                packet = bytes([0xAE, cmd, 0x02, 0xFF, 0x00, 0x56])
-                print(f"  cmd=0x{cmd:02X}  {hex_dump(packet)}")
+                packet = bytes([0xAE, cmd, 0x02, 0x63, 0x00, 0x56])
+                ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                line = f"  [{ts}] cmd=0x{cmd:02X}  {hex_dump(packet)}"
+                print(line)
+                sent_log.append(line)
                 await client.write_gatt_char(CHAR_CMD, packet, response=False)
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.3)
         except KeyboardInterrupt:
             print(f"\n*** Stopped at cmd=0x{cmd:02X} ***")
+            print(f"--- Last 5 commands before Ctrl+C ---")
+            for l in sent_log[-5:]:
+                print(l)
 
         print("\nDone. Turning off ...")
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
@@ -662,6 +700,464 @@ async def cmd_auto_ct(address: str, delay: float = 1.5):
         print("\nDone. Turning off ...")
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
         print("Color-temp auto-test complete.")
+
+
+async def cmd_auto_test(address: str, delay: float = 1.5):
+    """Combined auto-test: color temperature first, then RGB. Like YN150WY test style."""
+    print(f"Connecting to {address} ...")
+    async with BleakClient(address, timeout=10.0) as client:
+        print(f"Connected: {client.is_connected}")
+
+        def on_notify(_sender: BleakGATTCharacteristic, data: bytearray):
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            print(f"  <- notify: {hex_dump(data)}")
+
+        try:
+            await client.start_notify(CHAR_NOTIFY, on_notify)
+        except Exception:
+            pass
+
+        async def send_ct(channel, cw, ww, desc=""):
+            packet = bytes([0xAE, 0xAA, channel, cw, ww, 0x56])
+            tag = f"  [{desc}]" if desc else ""
+            print(f"  ch={channel:02X} CW={cw:2d} WW={ww:2d}  {hex_dump(packet)}{tag}")
+            await client.write_gatt_char(CHAR_CMD, packet, response=False)
+            await asyncio.sleep(delay)
+
+        async def send_rgb(r, g, b, desc=""):
+            packet = bytes([0xAE, 0xA1, r, g, b, 0x56])
+            tag = f"  [{desc}]" if desc else ""
+            print(f"  RGB({r:3d},{g:3d},{b:3d})  {hex_dump(packet)}{tag}")
+            await client.write_gatt_char(CHAR_CMD, packet, response=False)
+            await asyncio.sleep(delay)
+
+        ct_steps = list(range(0, 100, 10)) + [99]  # 0,10,20,...,90,99
+
+        # ============================================================
+        # Part 1: Color Temperature
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  PART 1: Color Temperature Test")
+        print("=" * 60)
+
+        # Turn on light first
+        print("\n--- Turning light ON ---")
+        await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
+        await asyncio.sleep(1.0)
+
+        for ch, ch_name in [(0x00, "YN150WY"), (0x01, "YN360")]:
+            print(f"\n{'─'*60}")
+            print(f"  Channel 0x{ch:02X} ({ch_name})")
+            print(f"{'─'*60}")
+
+            # Cool white ramp
+            print(f"\n--- Cool white ramp (WW=0) [ch=0x{ch:02X}] ---")
+            for v in ct_steps:
+                await send_ct(ch, v, 0, f"cool={v}")
+
+            # Warm white ramp
+            print(f"\n--- Warm white ramp (CW=0) [ch=0x{ch:02X}] ---")
+            for v in ct_steps:
+                await send_ct(ch, 0, v, f"warm={v}")
+
+            # Both ramp up together
+            print(f"\n--- Both ramp up (CW=WW) [ch=0x{ch:02X}] ---")
+            for v in ct_steps:
+                await send_ct(ch, v, v, f"both={v}")
+
+            # Cross-fade: cool -> warm
+            print(f"\n--- Cross-fade cool->warm [ch=0x{ch:02X}] ---")
+            for i in range(11):
+                cw = min(99, max(0, 99 - i * 10))
+                ww = min(99, max(0, i * 10))
+                await send_ct(ch, cw, ww, f"cool={cw} warm={ww}")
+
+        # ============================================================
+        # Part 2: RGB
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  PART 2: RGB Test")
+        print("=" * 60)
+
+        rgb_steps = list(range(0, 256, 17)) + [255]  # 0,17,34,...,255
+
+        # Red ramp
+        print("\n--- Red ramp (G=0, B=0) ---")
+        for v in rgb_steps:
+            await send_rgb(v, 0, 0, f"red={v}")
+
+        # Green ramp
+        print("\n--- Green ramp (R=0, B=0) ---")
+        for v in rgb_steps:
+            await send_rgb(0, v, 0, f"green={v}")
+
+        # Blue ramp
+        print("\n--- Blue ramp (R=0, G=0) ---")
+        for v in rgb_steps:
+            await send_rgb(0, 0, v, f"blue={v}")
+
+        # Hue rotation
+        print("\n--- Hue rotation (12 steps) ---")
+        hue_steps = [
+            (255, 0, 0, "red"),
+            (255, 128, 0, "orange"),
+            (255, 255, 0, "yellow"),
+            (128, 255, 0, "chartreuse"),
+            (0, 255, 0, "green"),
+            (0, 255, 128, "spring"),
+            (0, 255, 255, "cyan"),
+            (0, 128, 255, "azure"),
+            (0, 0, 255, "blue"),
+            (128, 0, 255, "violet"),
+            (255, 0, 255, "magenta"),
+            (255, 0, 128, "rose"),
+        ]
+        for r, g, b, name in hue_steps:
+            await send_rgb(r, g, b, name)
+
+        # White brightness ramp
+        print("\n--- White brightness ramp (R=G=B) ---")
+        for v in rgb_steps:
+            await send_rgb(v, v, v, f"white={v}")
+
+        # Done
+        print("\nDone. Turning off ...")
+        await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
+        print("Auto-test complete.")
+
+
+async def cmd_speed_test(address: str):
+    """BLE speed/throughput benchmark - find the limits of command rate."""
+    import colorsys
+    import time
+
+    print(f"Connecting to {address} ...")
+    async with BleakClient(address, timeout=10.0) as client:
+        print(f"Connected: {client.is_connected}")
+
+        # Turn on the light
+        print("\n--- Turning light ON ---")
+        await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0x00, 0x00, 0x56]), response=False)
+        await asyncio.sleep(0.5)
+
+        def rgb_from_hue(hue: float) -> tuple[int, int, int]:
+            r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+            return int(r * 255), int(g * 255), int(b * 255)
+
+        # ============================================================
+        # Phase 1: Raw throughput (write_without_response, no delay)
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  Phase 1: Raw throughput (no delay, fire-and-forget)")
+        print("=" * 60)
+
+        N = 200
+        print(f"\nSending {N} RGB commands as fast as possible...")
+        errors = 0
+        t0 = time.perf_counter()
+        for i in range(N):
+            hue = (i / N) % 1.0
+            r, g, b = rgb_from_hue(hue)
+            packet = bytes([0xAE, 0xA1, r, g, b, 0x56])
+            try:
+                await client.write_gatt_char(CHAR_CMD, packet, response=False)
+            except Exception as e:
+                errors += 1
+                if errors <= 3:
+                    print(f"  error #{errors} at i={i}: {e}")
+        t1 = time.perf_counter()
+        elapsed = t1 - t0
+        rate = N / elapsed if elapsed > 0 else 0
+        print(f"\n  Sent: {N - errors}/{N}  Errors: {errors}")
+        print(f"  Time: {elapsed:.3f}s  Rate: {rate:.1f} cmd/s")
+        print(f"  Avg interval: {elapsed / N * 1000:.1f}ms per command")
+        await asyncio.sleep(0.5)
+
+        # ============================================================
+        # Phase 2: Interval sweep - find the minimum reliable interval
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  Phase 2: Interval sweep (find minimum reliable interval)")
+        print("=" * 60)
+
+        intervals_ms = [0, 2, 5, 10, 15, 20, 30, 50]
+        CMDS_PER_INTERVAL = 60
+
+        results = []
+        for interval_ms in intervals_ms:
+            interval_s = interval_ms / 1000.0
+            errors = 0
+            write_times = []
+
+            print(f"\n  --- interval={interval_ms}ms, sending {CMDS_PER_INTERVAL} commands ---")
+            t0 = time.perf_counter()
+            for i in range(CMDS_PER_INTERVAL):
+                hue = (i / CMDS_PER_INTERVAL) % 1.0
+                r, g, b = rgb_from_hue(hue)
+                packet = bytes([0xAE, 0xA1, r, g, b, 0x56])
+                wt0 = time.perf_counter()
+                try:
+                    await client.write_gatt_char(CHAR_CMD, packet, response=False)
+                except Exception:
+                    errors += 1
+                wt1 = time.perf_counter()
+                write_times.append((wt1 - wt0) * 1000)  # ms
+                if interval_s > 0:
+                    await asyncio.sleep(interval_s)
+            t1 = time.perf_counter()
+            elapsed = t1 - t0
+            actual_rate = CMDS_PER_INTERVAL / elapsed if elapsed > 0 else 0
+            avg_write = sum(write_times) / len(write_times)
+            max_write = max(write_times)
+            min_write = min(write_times)
+
+            print(f"    OK: {CMDS_PER_INTERVAL - errors}/{CMDS_PER_INTERVAL}  "
+                  f"Rate: {actual_rate:.1f} cmd/s  "
+                  f"Write avg/min/max: {avg_write:.1f}/{min_write:.1f}/{max_write:.1f}ms")
+
+            results.append({
+                "interval_ms": interval_ms,
+                "rate": actual_rate,
+                "errors": errors,
+                "avg_write_ms": avg_write,
+                "max_write_ms": max_write,
+            })
+            await asyncio.sleep(0.3)
+
+        print("\n  Summary:")
+        print(f"  {'Interval':>10} {'Rate':>10} {'Errors':>8} {'Avg write':>10} {'Max write':>10}")
+        print(f"  {'-'*10} {'-'*10} {'-'*8} {'-'*10} {'-'*10}")
+        for r in results:
+            print(f"  {r['interval_ms']:>8}ms {r['rate']:>8.1f}/s {r['errors']:>8} "
+                  f"{r['avg_write_ms']:>8.1f}ms {r['max_write_ms']:>8.1f}ms")
+
+        # ============================================================
+        # Phase 3: Visual rainbow test at different speeds
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  Phase 3: Visual rainbow (watch for smooth vs choppy)")
+        print("=" * 60)
+        print("  Smooth = all commands received. Choppy/jumping = commands dropped.")
+
+        RAINBOW_STEPS = 360  # full hue circle
+        speeds = [
+            (50, "50ms - slow baseline (20 fps)"),
+            (20, "20ms - medium (50 fps)"),
+            (10, "10ms - fast (100 fps)"),
+            (5,  " 5ms - very fast (200 fps)"),
+            (0,  " 0ms - maximum speed"),
+        ]
+
+        for delay_ms, label in speeds:
+            print(f"\n  --- Rainbow: {label} ---")
+            delay_s = delay_ms / 1000.0
+            errors = 0
+            t0 = time.perf_counter()
+            for i in range(RAINBOW_STEPS):
+                hue = i / RAINBOW_STEPS
+                r, g, b = rgb_from_hue(hue)
+                packet = bytes([0xAE, 0xA1, r, g, b, 0x56])
+                try:
+                    await client.write_gatt_char(CHAR_CMD, packet, response=False)
+                except Exception:
+                    errors += 1
+                if delay_s > 0:
+                    await asyncio.sleep(delay_s)
+            t1 = time.perf_counter()
+            elapsed = t1 - t0
+            actual_rate = RAINBOW_STEPS / elapsed if elapsed > 0 else 0
+            print(f"    {RAINBOW_STEPS} steps in {elapsed:.2f}s = {actual_rate:.1f} cmd/s"
+                  f"  errors={errors}")
+            await asyncio.sleep(0.5)
+
+        # ============================================================
+        # Phase 4: Round-trip latency (write_with_response)
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  Phase 4: Round-trip latency (write WITH response)")
+        print("=" * 60)
+
+        N_RTT = 30
+        print(f"\n  Sending {N_RTT} commands with response=True...")
+        rtt_times = []
+        errors = 0
+        for i in range(N_RTT):
+            hue = (i / N_RTT) % 1.0
+            r, g, b = rgb_from_hue(hue)
+            packet = bytes([0xAE, 0xA1, r, g, b, 0x56])
+            wt0 = time.perf_counter()
+            try:
+                await client.write_gatt_char(CHAR_CMD, packet, response=True)
+                wt1 = time.perf_counter()
+                rtt_times.append((wt1 - wt0) * 1000)
+            except Exception as e:
+                errors += 1
+                if errors <= 3:
+                    print(f"    error #{errors}: {e}")
+
+        if rtt_times:
+            avg_rtt = sum(rtt_times) / len(rtt_times)
+            min_rtt = min(rtt_times)
+            max_rtt = max(rtt_times)
+            # sort for percentiles
+            sorted_rtt = sorted(rtt_times)
+            p50 = sorted_rtt[len(sorted_rtt) // 2]
+            p95 = sorted_rtt[int(len(sorted_rtt) * 0.95)]
+            max_rate_rtt = 1000 / avg_rtt if avg_rtt > 0 else 0
+            print(f"\n  RTT (ms): avg={avg_rtt:.1f}  min={min_rtt:.1f}  max={max_rtt:.1f}"
+                  f"  p50={p50:.1f}  p95={p95:.1f}")
+            print(f"  Theoretical max rate (with response): {max_rate_rtt:.1f} cmd/s")
+            print(f"  Errors: {errors}/{N_RTT}")
+        else:
+            print(f"  All {N_RTT} writes failed - device may not support write-with-response")
+
+        # ============================================================
+        # Done
+        # ============================================================
+        print("\n" + "=" * 60)
+        print("  DONE - Turning off")
+        print("=" * 60)
+        await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
+        print("\nTips for interpreting results:")
+        print("  - Phase 1 rate = raw BLE write throughput (OS + BLE stack limit)")
+        print("  - Phase 2 shows if adding delay changes error rate")
+        print("  - Phase 3: watch the light! Smooth rainbow = all commands received")
+        print("  - Phase 4 RTT = true BLE round-trip, sets hard upper bound")
+        print("  - If Phase 1 rate >> Phase 4 rate, writes are buffered/queued")
+        print("  - Practical limit for smooth control ≈ Phase 4 rate")
+
+
+async def cmd_rainbow(address: str, fps_list: list[int] | None = None):
+    """Frame-drop detection via buffer drain test.
+
+    Sends RED/BLUE stripes at target FPS for a fixed duration, then sends
+    a GREEN marker. If the light turns green immediately, no buffering and
+    the light keeps up. If delayed, the drain time reveals actual rate.
+
+    Formula: actual_rate = total_commands / (send_duration + drain_time)
+    """
+    import time
+
+    SEND_DURATION = 3.0  # seconds of stripe sending per test
+    STRIPE_FRAMES = 15   # frames per RED/BLUE block
+    IMMEDIATE_THRESHOLD = 1.0  # below this = "immediate" (reaction time)
+
+    target_fps_list = fps_list or [60, 100, 150, 200, 250, 300, 400, 500]
+
+    print(f"Connecting to {address} ...")
+    async with BleakClient(address, timeout=10.0) as client:
+        print(f"Connected: {client.is_connected}")
+
+        print("\n--- Turning light ON ---")
+        await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
+        await asyncio.sleep(0.5)
+
+        def busy_wait_until(target: float):
+            while time.perf_counter() < target:
+                pass
+
+        RED = bytes([0xAE, 0xA1, 0xFF, 0x00, 0x00, 0x56])
+        BLUE = bytes([0xAE, 0xA1, 0x00, 0x00, 0xFF, 0x56])
+        GREEN = bytes([0xAE, 0xA1, 0x00, 0xFF, 0x00, 0x56])
+
+        print()
+        print("=" * 64)
+        print("  Buffer Drain Frame-Drop Test")
+        print(f"  Each test: {SEND_DURATION:.0f}s RED/BLUE stripes -> GREEN marker")
+        print()
+        print("  Watch the light:")
+        print("    1. RED/BLUE flicker for 3 seconds")
+        print("    2. Then GREEN is sent")
+        print("    3. Press Enter the MOMENT light turns green")
+        print()
+        print("  If green is immediate -> light keeps up at this FPS")
+        print("  If red/blue continues after 'GREEN sent' -> buffered!")
+        print("=" * 64)
+
+        results = []
+
+        for target_fps in target_fps_list:
+            total = int(target_fps * SEND_DURATION)
+            interval = 1.0 / target_fps
+
+            print(f"\n{'_'*64}")
+            print(f"  {target_fps} FPS  ({total} commands in {SEND_DURATION:.0f}s, "
+                  f"interval={interval*1000:.1f}ms)")
+            print(f"{'_'*64}")
+
+            # Reset to white between tests so user sees clear start
+            await client.write_gatt_char(
+                CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
+            input("  Press Enter to start...")
+
+            # Send RED/BLUE stripes
+            errors = 0
+            t_start = time.perf_counter()
+            next_send = t_start
+
+            for i in range(total):
+                block = (i // STRIPE_FRAMES) % 2
+                packet = RED if block == 0 else BLUE
+                try:
+                    await client.write_gatt_char(CHAR_CMD, packet, response=False)
+                except Exception:
+                    errors += 1
+                next_send += interval
+                busy_wait_until(next_send)
+
+            # Send GREEN marker
+            await client.write_gatt_char(CHAR_CMD, GREEN, response=False)
+            t_green_sent = time.perf_counter()
+            actual_send_time = t_green_sent - t_start
+            actual_fps = total / actual_send_time if actual_send_time > 0 else 0
+
+            print(f"\n  >>> GREEN SENT  (sent {total} cmds in {actual_send_time:.2f}s"
+                  f" = {actual_fps:.0f} fps)")
+            print(f"  >>> Press Enter when light turns GREEN <<<")
+
+            input()
+            t_green_seen = time.perf_counter()
+            drain = t_green_seen - t_green_sent
+
+            if drain < IMMEDIATE_THRESHOLD:
+                print(f"  -> {drain:.1f}s (immediate) -> light handles >= {target_fps} fps")
+                results.append((target_fps, total, drain, None))
+            else:
+                adjusted_drain = max(0, drain - 0.3)  # subtract reaction time
+                effective = total / (SEND_DURATION + adjusted_drain)
+                print(f"  -> drain={drain:.1f}s -> effective ~{effective:.0f} fps")
+                results.append((target_fps, total, drain, effective))
+
+            if errors:
+                print(f"     (write errors: {errors})")
+
+        # Summary
+        print(f"\n{'='*64}")
+        print("  SUMMARY")
+        print(f"{'='*64}")
+        print(f"  {'FPS':>6}  {'Sent':>6}  {'Drain':>7}  Result")
+        print(f"  {'─'*6}  {'─'*6}  {'─'*7}  {'─'*30}")
+
+        effective_rates = []
+        for fps, total, drain, effective in results:
+            if effective is None:
+                print(f"  {fps:>5d}   {total:>5d}   {drain:>5.1f}s   OK (>= {fps} fps)")
+            else:
+                print(f"  {fps:>5d}   {total:>5d}   {drain:>5.1f}s   "
+                      f"buffered -> ~{effective:.0f} fps")
+                effective_rates.append(effective)
+
+        if effective_rates:
+            avg_rate = sum(effective_rates) / len(effective_rates)
+            print(f"\n  Estimated light processing rate: ~{avg_rate:.0f} fps")
+        else:
+            top_fps = target_fps_list[-1]
+            print(f"\n  No buffering detected! Light handles >= {top_fps} fps")
+
+        print()
+        await client.write_gatt_char(
+            CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
+        print("  Light off. Done.")
 
 
 async def cmd_probe(address: str):
@@ -789,6 +1285,11 @@ def main():
             print("Usage: debug_ble.py probe-ct-ch ADDRESS")
             sys.exit(1)
         asyncio.run(cmd_probe_ct_ch(sys.argv[2]))
+    elif command == "auto-test":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py auto-test ADDRESS")
+            sys.exit(1)
+        asyncio.run(cmd_auto_test(sys.argv[2]))
     elif command == "auto-rgb":
         if len(sys.argv) < 3:
             print("Usage: debug_ble.py auto-rgb ADDRESS")
@@ -799,6 +1300,20 @@ def main():
             print("Usage: debug_ble.py auto-ct ADDRESS")
             sys.exit(1)
         asyncio.run(cmd_auto_ct(sys.argv[2]))
+    elif command == "speed-test":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py speed-test ADDRESS")
+            sys.exit(1)
+        asyncio.run(cmd_speed_test(sys.argv[2]))
+    elif command == "rainbow":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py rainbow ADDRESS [FPS,FPS,...]")
+            print("  e.g.: debug_ble.py rainbow AA:BB:CC:DD:EE:FF 100,150,200,250,300")
+            sys.exit(1)
+        fps_list = None
+        if len(sys.argv) >= 4:
+            fps_list = [int(x) for x in sys.argv[3].split(",")]
+        asyncio.run(cmd_rainbow(sys.argv[2], fps_list))
     else:
         print(f"Unknown command: {command}")
         print(__doc__)
