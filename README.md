@@ -38,7 +38,7 @@ Retry strategy is intentionally asymmetric:
 
 - Every command is attempted once immediately.
 - If command traffic is still active (newer command appears), retries are skipped.
-- A command is retried **only if it remains the latest command** for a quiet window.
+- A command is retried immediately **only if it is still the latest command**.
 - If a newer command arrives while retrying, retries for the older command are aborted immediately.
 
 In short:

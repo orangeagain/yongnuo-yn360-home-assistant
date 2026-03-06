@@ -50,8 +50,7 @@ class YongnuoYn360Device:
 
         # Retry strategy:
         # - During high-speed command stream: no retry.
-        # - Retry only when this command stays the latest for a quiet window.
-        self._retry_quiet_window = 0.22
+        # - Retry immediately only when this command is still the latest one.
 
         # Sequence number for detecting newer commands.
         self._seq = 0
@@ -97,18 +96,6 @@ class YongnuoYn360Device:
 
     def _has_newer_command(self, seq: int) -> bool:
         return self._pending is not None and self._pending.seq > seq
-
-    async def _wait_for_quiet_window(self, seq: int) -> bool:
-        """Return True when no newer command arrives during quiet window."""
-        step = 0.02
-        waited = 0.0
-        while waited < self._retry_quiet_window:
-            if self._has_newer_command(seq):
-                return False
-            sleep_for = min(step, self._retry_quiet_window - waited)
-            await asyncio.sleep(sleep_for)
-            waited += sleep_for
-        return not self._has_newer_command(seq)
 
     async def _worker(self) -> None:
         while True:
@@ -213,13 +200,7 @@ class YongnuoYn360Device:
             _LOGGER.debug("Skip retry for %s due to newer command", self.address)
             return
 
-        # Retry only if this command stays the latest for a quiet window.
-        quiet = await self._wait_for_quiet_window(seq)
-        if not quiet:
-            _LOGGER.debug("Skip retry for %s; command stream still active", self.address)
-            return
-
-        # Low-speed/final command mode: retry this latest command.
+        # Retry only while this command remains the latest one.
         for delay in (0.0, 0.12, 0.25, 0.45):
             if self._has_newer_command(seq) or self._wake_event.is_set():
                 _LOGGER.debug("Abort retries for %s because newer command arrived", self.address)
