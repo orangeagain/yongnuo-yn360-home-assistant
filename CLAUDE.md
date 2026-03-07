@@ -4,7 +4,7 @@
 
 **适配 YN150**：当前代码只支持 YN360，主要目标是让代码同时兼容 YN150 系列。
 
-**已验证：YN150 与 YN360 的 BLE 协议完全兼容，无需修改编解码。**
+**已验证：YN150 与 YN360 的 BLE 协议基本兼容，RGB 命令相同，色温命令的 channel 字节不同（YN360=0x01, YN150Ultra RGB=0x00, YN150WY=0x09）。**
 
 ## Project Structure
 
@@ -31,12 +31,13 @@ custom_components/yongnuo_yn360/
 |---------|--------|-------|
 | RGB color | `AE A1 RR GG BB 56` | RR/GG/BB: 0x00-0xFF |
 | Color temp (YN360) | `AE AA 01 CW WW 56` | CW=cool white, WW=warm white, range 0-99 (0x00-0x63) |
-| Color temp (YN150) | `AE AA 00 CW WW 56` | channel byte = 0x00 instead of 0x01 |
+| Color temp (YN150 Ultra RGB) | `AE AA 00 CW WW 56` | channel byte = 0x00 |
+| Color temp (YN150WY) | `AE AA 09 CW WW 56` | channel byte = 0x09 |
 | Turn off | `AE A3 00 00 00 56` | All models |
 
 ### Color Temperature Protocol Details (verified 2026-03-07)
 
-- YN360 uses channel=0x01, YN150WY uses channel=0x00
+- YN360 uses channel=0x01, YN150 Ultra RGB uses channel=0x00, YN150WY uses channel=0x09
 - CW/WW values range 0-99 (0x63 = max), NOT 0-255. Values > 99 are ignored
 - On YN150WY, `AE A1` turns the light on but RGB values are ignored (no RGB LEDs)
 - Reference: [Samuel Pinches YN360 BLE reverse engineering](https://samuelpinches.com.au/hacking/hacking-yn360-light-wand/), [kenkeiter/lantern](https://github.com/kenkeiter/lantern)
@@ -76,13 +77,14 @@ custom_components/yongnuo_yn360/
 
 ### Protocol Compatibility Result
 
-**YN150Ultra RGB uses the same protocol as YN360.** Verified commands:
+**YN150Ultra RGB** verified commands:
 - `AE A1 FF 00 00 56` - red: OK
 - `AE A1 00 FF 00 56` - green: OK
 - `AE A1 00 00 FF 56` - blue: OK
+- `AE AA 00 63 00 56` - cool white max: OK (channel=0x00)
 - `AE A3 00 00 00 56` - turn off: OK
 
-No code changes needed for basic RGB control.
+YN150Ultra RGB supports both RGB and color temperature (has both RGB and CW/WW LEDs).
 
 ### YN150WY Color Temperature Testing (2026-03-07)
 
@@ -92,17 +94,16 @@ No code changes needed for basic RGB control.
 - `fff5` reads as ASCII "CHAR5_VALUE" (placeholder, not useful)
 - `AE A1 RR GG BB 56` turns light on, but RGB values ignored (WY has no RGB LEDs)
 - `AE AA 01 CW WW 56` (YN360 format, channel=0x01): **no response**
-- `AE AA 00 CW WW 56` (channel=0x00): **works!**
-  - `AE AA 00 00 63 56` - warm white max: OK
-  - `AE AA 00 63 00 56` - cool white max: OK
-  - `AE AA 00 32 32 56` - mixed: OK
-  - `AE AA 00 00 10 56` - low brightness warm: OK
+- `AE AA 00 CW WW 56` (channel=0x00): **no response** (previously incorrectly documented as working)
+- `AE AA 09 CW WW 56` (channel=0x09): **works!**
+  - `AE AA 09 63 00 56` - cool white max: OK
+  - `AE AA 09 00 63 56` - warm white max: OK
 - CW/WW range: 0-99 (0x00-0x63). Values 0xFF ignored by device
 
 ### Remaining Work
 
 - Update integration to support color temperature mode (HA `COLOR_TEMP` color mode)
-- Detect YN150WY vs YN150Ultra RGB (by BLE device name?) to use correct channel byte
+- Detect model by BLE device name to select correct channel byte (YN360=0x01, YN150Ultra RGB=0x00, YN150WY=0x09)
 - Explore `fff3`/`fff4` characteristics for additional features (effects, etc.)
 
 ## Debug Tool

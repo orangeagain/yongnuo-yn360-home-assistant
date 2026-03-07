@@ -1401,6 +1401,100 @@ async def cmd_probe(address: str):
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
 
 
+async def cmd_probe_wy_ct(address: str):
+    """Systematic YN150WY color temperature probe.
+
+    Tests AA command with all channel values 0x00-0x0F on both CHAR_CMD and fff3,
+    pausing after each step so the user can visually observe the light.
+    """
+    CHAR_FFF3 = "0000fff3-0000-1000-8000-00805f9b34fb"
+    CHAR_FFF4 = "0000fff4-0000-1000-8000-00805f9b34fb"
+
+    print(f"Connecting to {address} ...")
+    async with BleakClient(address, timeout=10.0) as client:
+        print(f"Connected: {client.is_connected}")
+
+        def on_notify(_sender: BleakGATTCharacteristic, data: bytearray):
+            print(f"  <- notify: {hex_dump(data)}")
+
+        try:
+            await client.start_notify(CHAR_NOTIFY, on_notify)
+        except Exception:
+            pass
+
+        # Also try to subscribe to fff4 notifications
+        try:
+            await client.start_notify(CHAR_FFF4, on_notify)
+            print(f"  (also subscribed to fff4 notify)")
+        except Exception:
+            pass
+
+        async def send_and_wait(char_uuid, packet, desc):
+            print(f"\n  {desc}")
+            print(f"    -> {hex_dump(packet)}")
+            await client.write_gatt_char(char_uuid, packet, response=False)
+            await asyncio.sleep(0.3)
+            input("    Press Enter for next...")
+
+        # Step 0: Turn on with A1
+        print("\n" + "=" * 60)
+        print("  YN150WY Color Temperature Probe")
+        print("=" * 60)
+        print("\n--- Step 0: Turn light ON with A1 ---")
+        await client.write_gatt_char(
+            CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
+        await asyncio.sleep(1.0)
+        print("  Light should be ON now.")
+
+        # Step 1: AA command on CHAR_CMD with channel 0x00 - 0x0F
+        print("\n" + "=" * 60)
+        print("  Step 1: AA on CHAR_CMD, channel 0x00-0x0F, CW=99 WW=0")
+        print("=" * 60)
+        for ch in range(0x10):
+            packet = bytes([0xAE, 0xAA, ch, 0x63, 0x00, 0x56])
+            await send_and_wait(CHAR_CMD, packet, f"ch=0x{ch:02X} CW=99 WW=0")
+
+        # Step 2: AA command on CHAR_CMD with channel 0x00 - 0x0F, warm white
+        print("\n" + "=" * 60)
+        print("  Step 2: AA on CHAR_CMD, channel 0x00-0x0F, CW=0 WW=99")
+        print("=" * 60)
+        for ch in range(0x10):
+            packet = bytes([0xAE, 0xAA, ch, 0x00, 0x63, 0x56])
+            await send_and_wait(CHAR_CMD, packet, f"ch=0x{ch:02X} CW=0 WW=99")
+
+        # Step 3: Try AA on fff3
+        print("\n" + "=" * 60)
+        print("  Step 3: AA on fff3, channel 0x00-0x03")
+        print("=" * 60)
+        for ch in range(0x04):
+            packet = bytes([0xAE, 0xAA, ch, 0x63, 0x00, 0x56])
+            await send_and_wait(CHAR_FFF3, packet, f"fff3 ch=0x{ch:02X} CW=99 WW=0")
+        for ch in range(0x04):
+            packet = bytes([0xAE, 0xAA, ch, 0x00, 0x63, 0x56])
+            await send_and_wait(CHAR_FFF3, packet, f"fff3 ch=0x{ch:02X} CW=0 WW=99")
+
+        # Step 4: Try other command bytes (A2, A4-A9, AB-AF) for color temp
+        print("\n" + "=" * 60)
+        print("  Step 4: Other cmd bytes on CHAR_CMD (CW=99 in byte3)")
+        print("=" * 60)
+        for cmd in [0xA2, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF]:
+            packet = bytes([0xAE, cmd, 0x00, 0x63, 0x00, 0x56])
+            await send_and_wait(CHAR_CMD, packet, f"cmd=0x{cmd:02X} byte2=0x00 byte3=0x63 byte4=0x00")
+
+        # Step 5: Try CW/WW with values > 99 (0x64-0xFF range)
+        print("\n" + "=" * 60)
+        print("  Step 5: AA ch=0x00, high CW values (100, 128, 200, 255)")
+        print("=" * 60)
+        for cw in [100, 128, 200, 255]:
+            packet = bytes([0xAE, 0xAA, 0x00, cw, 0x00, 0x56])
+            await send_and_wait(CHAR_CMD, packet, f"ch=0x00 CW={cw} WW=0")
+
+        print("\n--- Done. Turning off ---")
+        await client.write_gatt_char(
+            CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
+        print("Probe complete.")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -1484,6 +1578,11 @@ def main():
         if len(sys.argv) >= 4:
             fps_list = [int(x) for x in sys.argv[3].split(",")]
         asyncio.run(cmd_rainbow(sys.argv[2], fps_list))
+    elif command == "probe-wy":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py probe-wy ADDRESS")
+            sys.exit(1)
+        asyncio.run(cmd_probe_wy_ct(sys.argv[2]))
     elif command == "parallel":
         if len(sys.argv) < 3:
             print("Usage: debug_ble.py parallel ADDR,MODE,FPS [ADDR,MODE,FPS ...]")
