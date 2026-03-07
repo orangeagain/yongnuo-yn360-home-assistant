@@ -1,0 +1,12 @@
+- id: "yongnuo_sunrise_two_hour_serial"
+  alias: "Yongnuo sunrise two-hour serial ramp"
+  description: "At sunrise, ramp three Yongnuo lights linearly over two hours with 30-second serialized updates."
+  trigger:
+    - platform: sun
+      event: sunrise
+  condition: []
+  action:
+    - service: script.turn_on
+      target:
+        entity_id: script.yongnuo_sunrise_two_hour_serial
+  mode: single

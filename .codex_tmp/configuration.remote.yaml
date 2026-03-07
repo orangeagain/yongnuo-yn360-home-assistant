@@ -25,8 +25,30 @@ logger:
     dbus_fast: debug
 
 homekit:
-  filter:
-    include_entities:
-      - light.yn360_led_video_light_db_b9_85_86_42_60
-      - light.yn360_led_video_light_d0_32_34_39_74_49
-      - light.yn360_led_video_light_d0_32_34_39_6d_6f
+  - name: YN150 RGB 4260
+    port: 21063
+    mode: accessory
+    filter:
+      include_entities:
+        - light.yn360_led_video_light_db_b9_85_86_42_60
+    entity_config:
+      light.yn360_led_video_light_db_b9_85_86_42_60:
+        name: YN150 RGB 4260
+  - name: YN150 WY 7449
+    port: 21064
+    mode: accessory
+    filter:
+      include_entities:
+        - light.yn360_led_video_light_d0_32_34_39_74_49
+    entity_config:
+      light.yn360_led_video_light_d0_32_34_39_74_49:
+        name: YN150 WY 7449
+  - name: YN150 RGB 6D6F
+    port: 21065
+    mode: accessory
+    filter:
+      include_entities:
+        - light.yn360_led_video_light_d0_32_34_39_6d_6f
+    entity_config:
+      light.yn360_led_video_light_d0_32_34_39_6d_6f:
+        name: YN150 RGB 6D6F
