@@ -1,4 +1,3 @@
-import asyncio
 import logging
 
 from homeassistant.components.light import (
@@ -12,11 +11,12 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .ble_dispatcher import YongnuoBleDispatcher
 from .const import (
     CONF_ADDRESS,
     CONF_IDLE_DISCONNECT_SECONDS,
     CONF_MODEL,
-    DATA_BLE_SLOT_SEMAPHORE,
+    DATA_BLE_DISPATCHER,
     DEFAULT_IDLE_DISCONNECT_SECONDS,
     DOMAIN,
     MAX_COLOR_TEMP_KELVIN,
@@ -42,20 +42,18 @@ class YongnuoLight(LightEntity):
 
     def __init__(
         self,
-        hass: HomeAssistant,
         address: str,
         model: str,
-        slot_limiter: asyncio.Semaphore,
+        dispatcher: YongnuoBleDispatcher,
         idle_disconnect_seconds: float,
     ):
         self._address = address
         self._profile = get_model_profile(model)
         self._attr_unique_id = f"yongnuo_{self._address.replace(':', '').lower()}"
         self._device = YongnuoYn360Device(
-            hass,
             address,
             self._profile.key,
-            slot_limiter=slot_limiter,
+            dispatcher,
             idle_disconnect_seconds=idle_disconnect_seconds,
         )
         self._is_on = False
@@ -139,40 +137,41 @@ class YongnuoLight(LightEntity):
             self._brightness,
         )
 
+        new_brightness = self._brightness
+        new_rgb_color = self._rgb_color
+        new_color_temp_kelvin = self._color_temp_kelvin
+        new_color_mode = self._color_mode
+
         if ATTR_BRIGHTNESS in kwargs:
-            self._brightness = kwargs[ATTR_BRIGHTNESS]
+            new_brightness = kwargs[ATTR_BRIGHTNESS]
 
         if self._profile.supports_rgb and ATTR_RGB_COLOR in kwargs:
-            self._rgb_color = tuple(kwargs[ATTR_RGB_COLOR])
-            self._color_mode = ColorMode.RGB
+            new_rgb_color = tuple(kwargs[ATTR_RGB_COLOR])
+            new_color_mode = ColorMode.RGB
 
         if self._profile.supports_color_temp:
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
-                self._color_temp_kelvin = clamp_kelvin(kwargs[ATTR_COLOR_TEMP_KELVIN])
-                self._color_mode = ColorMode.COLOR_TEMP
+                new_color_temp_kelvin = clamp_kelvin(kwargs[ATTR_COLOR_TEMP_KELVIN])
+                new_color_mode = ColorMode.COLOR_TEMP
 
-        brightness_pct = remap_brightness(self._brightness)
+        brightness_pct = remap_brightness(new_brightness)
 
-        if self._color_mode == ColorMode.COLOR_TEMP and self._profile.supports_color_temp:
-            if not self._is_on and not self._profile.supports_rgb:
-                _LOGGER.debug(
-                    "Waking color-temp-only light %s model=%s before CT command",
-                    self._address,
-                    self._profile.label,
-                )
-                await self._device.wake_up()
-                # YN150WY needs a brief settle time after A1 before AA CT packets apply.
-                await asyncio.sleep(0.5)
+        if new_color_mode == ColorMode.COLOR_TEMP and self._profile.supports_color_temp:
             _LOGGER.debug(
                 "Applying color temperature to %s model=%s kelvin=%s brightness_pct=%s",
                 self._address,
                 self._profile.label,
-                self._color_temp_kelvin,
+                new_color_temp_kelvin,
                 brightness_pct,
             )
-            await self._device.set_color_temperature(self._color_temp_kelvin, brightness_pct)
+            sent = await self._device.set_color_temperature(
+                new_color_temp_kelvin,
+                brightness_pct,
+                wake_before=not self._is_on and not self._profile.supports_rgb,
+                wake_delay_seconds=0.5,
+            )
         else:
-            r, g, b = self._rgb_color
+            r, g, b = new_rgb_color
             _LOGGER.debug(
                 "Applying RGB to %s model=%s rgb=%s brightness_pct=%s",
                 self._address,
@@ -180,14 +179,33 @@ class YongnuoLight(LightEntity):
                 (r, g, b),
                 brightness_pct,
             )
-            await self._device.set_rgb(r, g, b, brightness_pct)
+            sent = await self._device.set_rgb(r, g, b, brightness_pct)
 
+        if not sent:
+            _LOGGER.warning(
+                "Skipped state update for %s model=%s because BLE operation expired or timed out",
+                self._address,
+                self._profile.label,
+            )
+            return
+
+        self._brightness = new_brightness
+        self._rgb_color = new_rgb_color
+        self._color_temp_kelvin = new_color_temp_kelvin
+        self._color_mode = new_color_mode
         self._is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs):
         _LOGGER.debug("turn_off requested for %s model=%s", self._address, self._profile.label)
-        await self._device.turn_off()
+        sent = await self._device.turn_off()
+        if not sent:
+            _LOGGER.warning(
+                "Skipped turn_off state update for %s model=%s because BLE operation expired or timed out",
+                self._address,
+                self._profile.label,
+            )
+            return
         self._is_on = False
         self.async_write_ha_state()
 
@@ -211,7 +229,7 @@ async def async_setup_entry(
             DEFAULT_IDLE_DISCONNECT_SECONDS,
         )
     )
-    slot_limiter = hass.data[DOMAIN][DATA_BLE_SLOT_SEMAPHORE]
+    dispatcher = hass.data[DOMAIN][DATA_BLE_DISPATCHER]
 
     _LOGGER.debug(
         "Setting up light entry %s with model=%s idle_disconnect_seconds=%.1f",
@@ -222,10 +240,9 @@ async def async_setup_entry(
     async_add_entities(
         [
             YongnuoLight(
-                hass,
                 address,
                 model,
-                slot_limiter,
+                dispatcher,
                 idle_disconnect_seconds,
             )
         ]

@@ -21,7 +21,7 @@
     "step": {
       "init": {
         "title": "Verbindungsverhalten",
-        "description": "Kuerzere Leerlauf-Trennzeiten geben knappe Bluetooth-Verbindungsslots auf HAOS-Servern schneller frei.",
+        "description": "Steuert, wie lange der gemeinsame BLE-Worker die aktuelle Leuchte fuer den naechsten Warteschlangen-Befehl verbunden haelt.",
         "data": {
           "idle_disconnect_seconds": "Leerlauf-Trennzeit (Sekunden)"
         }
