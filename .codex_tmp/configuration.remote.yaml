@@ -1,0 +1,32 @@
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+logger:
+  default: info
+  logs:
+    custom_components.yongnuo_yn360: debug
+    homeassistant.components.bluetooth: debug
+    homeassistant.components.light: debug
+    habluetooth: debug
+    bluetooth_adapters: debug
+    bluetooth_auto_recovery: debug
+    bleak: debug
+    bleak.backends.bluezdbus: debug
+    bleak_retry_connector: debug
+    dbus_fast: debug
+
+homekit:
+  filter:
+    include_entities:
+      - light.yn360_led_video_light_db_b9_85_86_42_60
+      - light.yn360_led_video_light_d0_32_34_39_74_49
+      - light.yn360_led_video_light_d0_32_34_39_6d_6f

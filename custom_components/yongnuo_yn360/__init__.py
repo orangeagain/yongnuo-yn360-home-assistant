@@ -1,5 +1,8 @@
 import logging
 
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+
 from .ble_dispatcher import YongnuoBleDispatcher
 from .const import (
     CONF_ADDRESS,
@@ -15,7 +18,11 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup(hass, config):
     return True
 
-async def async_setup_entry(hass, config_entry):
+async def async_reload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(config_entry.entry_id)
+
+
+async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     data = dict(config_entry.data)
     configured_model = data.get(CONF_MODEL)
     detected_model = await async_detect_model_for_address(hass, data[CONF_ADDRESS])
@@ -57,11 +64,14 @@ async def async_setup_entry(hass, config_entry):
     if DATA_BLE_DISPATCHER not in hass.data[DOMAIN]:
         hass.data[DOMAIN][DATA_BLE_DISPATCHER] = YongnuoBleDispatcher(hass)
     hass.data[DOMAIN][config_entry.entry_id] = data
+    config_entry.async_on_unload(
+        config_entry.add_update_listener(async_reload_entry)
+    )
 
     await hass.config_entries.async_forward_entry_setups(config_entry, ["light"])
     return True
 
-async def async_unload_entry(hass, config_entry):
+async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     unloaded = await hass.config_entries.async_unload_platforms(config_entry, ["light"])
     if unloaded:
         domain_data = hass.data.get(DOMAIN)

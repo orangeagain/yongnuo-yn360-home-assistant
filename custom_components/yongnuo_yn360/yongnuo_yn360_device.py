@@ -4,7 +4,9 @@ import struct
 from .ble_dispatcher import BleOperationStep, YongnuoBleDispatcher
 from .const import (
     DEFAULT_IDLE_DISCONNECT_SECONDS,
+    MAX_COLOR_TEMP_CHANNEL,
     MAX_COLOR_TEMP_KELVIN,
+    MIN_COLOR_TEMP_CHANNEL,
     MAX_WHITE_LEVEL,
     MIN_COLOR_TEMP_KELVIN,
 )
@@ -26,12 +28,20 @@ class YongnuoYn360Device:
         model: str,
         dispatcher: YongnuoBleDispatcher,
         *,
+        color_temp_channel: int | None = None,
         idle_disconnect_seconds: float = DEFAULT_IDLE_DISCONNECT_SECONDS,
     ):
         self.address = address
         self.profile = get_model_profile(model)
         self._dispatcher = dispatcher
         self._idle_disconnect_seconds = max(0.0, idle_disconnect_seconds)
+        if color_temp_channel is None:
+            self._color_temp_channel = self.profile.color_temp_channel
+        else:
+            self._color_temp_channel = max(
+                MIN_COLOR_TEMP_CHANNEL,
+                min(MAX_COLOR_TEMP_CHANNEL, int(color_temp_channel)),
+            )
 
     async def async_shutdown(self) -> None:
         return
@@ -82,7 +92,7 @@ class YongnuoYn360Device:
         return packet
 
     def _build_color_temp_packet(self, color_temp_kelvin: int, brightness: int) -> bytes:
-        if not self.profile.supports_color_temp or self.profile.color_temp_channel is None:
+        if not self.profile.supports_color_temp or self._color_temp_channel is None:
             raise ValueError(f"{self.profile.label} does not support color temperature control")
 
         kelvin = min(max(color_temp_kelvin, MIN_COLOR_TEMP_KELVIN), MAX_COLOR_TEMP_KELVIN)
@@ -104,7 +114,7 @@ class YongnuoYn360Device:
             ">BBBBBB",
             0xAE,
             0xAA,
-            self.profile.color_temp_channel,
+            self._color_temp_channel,
             cool,
             warm,
             0x56,
@@ -115,7 +125,7 @@ class YongnuoYn360Device:
             self.profile.label,
             kelvin,
             brightness,
-            self.profile.color_temp_channel,
+            self._color_temp_channel,
             cool,
             warm,
             _hex(packet),

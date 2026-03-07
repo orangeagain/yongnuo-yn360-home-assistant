@@ -5,11 +5,14 @@ import voluptuous as vol
 
 from .const import (
     CONF_ADDRESS,
+    CONF_COLOR_TEMP_CHANNEL,
     CONF_IDLE_DISCONNECT_SECONDS,
     CONF_MODEL,
     DEFAULT_IDLE_DISCONNECT_SECONDS,
     DOMAIN,
+    MAX_COLOR_TEMP_CHANNEL,
     MAX_IDLE_DISCONNECT_SECONDS,
+    MIN_COLOR_TEMP_CHANNEL,
 )
 from .models import (
     get_discovery_name,
@@ -117,14 +120,25 @@ class YongnuoYn360OptionsFlow(config_entries.OptionsFlow):
         self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
+        profile = get_model_profile(self._config_entry.data.get(CONF_MODEL))
+
         if user_input is not None:
+            data = {
+                CONF_IDLE_DISCONNECT_SECONDS: float(
+                    user_input[CONF_IDLE_DISCONNECT_SECONDS]
+                )
+            }
+            if profile.supports_color_temp and profile.color_temp_channel is not None:
+                data[CONF_COLOR_TEMP_CHANNEL] = max(
+                    MIN_COLOR_TEMP_CHANNEL,
+                    min(
+                        MAX_COLOR_TEMP_CHANNEL,
+                        int(user_input[CONF_COLOR_TEMP_CHANNEL]),
+                    ),
+                )
             return self.async_create_entry(
                 title="",
-                data={
-                    CONF_IDLE_DISCONNECT_SECONDS: float(
-                        user_input[CONF_IDLE_DISCONNECT_SECONDS]
-                    )
-                },
+                data=data,
             )
 
         idle_disconnect_seconds = float(
@@ -133,21 +147,42 @@ class YongnuoYn360OptionsFlow(config_entries.OptionsFlow):
                 DEFAULT_IDLE_DISCONNECT_SECONDS,
             )
         )
-        schema = vol.Schema(
-            {
+        schema_fields = {
+            vol.Required(
+                CONF_IDLE_DISCONNECT_SECONDS,
+                default=idle_disconnect_seconds,
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=MAX_IDLE_DISCONNECT_SECONDS,
+                    step=0.1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+        }
+
+        if profile.supports_color_temp and profile.color_temp_channel is not None:
+            color_temp_channel = int(
+                self._config_entry.options.get(
+                    CONF_COLOR_TEMP_CHANNEL,
+                    profile.color_temp_channel,
+                )
+            )
+            schema_fields[
                 vol.Required(
-                    CONF_IDLE_DISCONNECT_SECONDS,
-                    default=idle_disconnect_seconds,
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0,
-                        max=MAX_IDLE_DISCONNECT_SECONDS,
-                        step=0.1,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-            }
-        )
+                    CONF_COLOR_TEMP_CHANNEL,
+                    default=color_temp_channel,
+                )
+            ] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=MIN_COLOR_TEMP_CHANNEL,
+                    max=MAX_COLOR_TEMP_CHANNEL,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+
+        schema = vol.Schema(schema_fields)
 
         return self.async_show_form(
             step_id="init",

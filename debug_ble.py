@@ -7,6 +7,8 @@ Usage:
   python debug_ble.py sniff ADDRESS     # Subscribe to all notify/indicate characteristics
   python debug_ble.py write ADDRESS UUID HEX  # Write raw hex bytes to a characteristic
   python debug_ble.py wy-ct ADDRESS [CHANNEL]  # Fixed CT sequence: OFF -> WAKE -> COOL -> WARM (default CH=0A)
+  python debug_ble.py probe-ct ADDRESS  # Probe aa61 CT channels (compat wrapper)
+  python debug_ble.py probe-ct-full ADDRESS  # Exhaustive CT scan on aa61 and fff3
   python debug_ble.py probe ADDRESS     # Try command types A0-AF interactively
   python debug_ble.py rainbow ADDRESS [FPS,FPS,...]  # Visual FPS test: find the real frame rate limit
   python debug_ble.py parallel ADDR,MODE,FPS [ADDR,MODE,FPS ...]  # Multi-light parallel test
@@ -18,6 +20,7 @@ Examples:
   python debug_ble.py sniff AA:BB:CC:DD:EE:FF
   python debug_ble.py write AA:BB:CC:DD:EE:FF f000aa61-0451-4000-b000-000000000000 AEA1FF000056
   python debug_ble.py wy-ct D0:32:34:39:74:49
+  python debug_ble.py probe-ct-full DB:B9:85:86:42:60
   python debug_ble.py probe AA:BB:CC:DD:EE:FF
   python debug_ble.py rainbow DB:B9:85:86:42:60 200,300,400,500
   python debug_ble.py parallel DB:B9:85:86:42:60,rgb,300 D0:32:34:39:6D:6F,rgb,300 D0:32:34:39:74:49,ct,100
@@ -670,6 +673,77 @@ async def cmd_probe_ct_ch(address: str):
 
         print("\nDone. Turning off ...")
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
+
+
+async def cmd_probe_ct(address: str):
+    """Compatibility wrapper for the historical probe-ct CLI entry."""
+    await cmd_probe_ct_ch(address)
+
+
+async def cmd_probe_ct_full(address: str, delay: float = 0.3):
+    """Exhaustively scan AE AA CT channels on both aa61 and fff3."""
+    CHAR_FFF3 = "0000fff3-0000-1000-8000-00805f9b34fb"
+    CHAR_FFF4 = "0000fff4-0000-1000-8000-00805f9b34fb"
+
+    print(f"Connecting to {address} ...")
+    async with BleakClient(address, timeout=10.0) as client:
+        print(f"Connected: {client.is_connected}")
+
+        def on_notify(_sender: BleakGATTCharacteristic, data: bytearray):
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            print(f"  <- notify {_sender.uuid}: {hex_dump(data)}")
+
+        for cuuid in [CHAR_NOTIFY, CHAR_FFF4]:
+            try:
+                await client.start_notify(cuuid, on_notify)
+                print(f"Subscribed to {cuuid}")
+            except Exception:
+                pass
+
+        async def write_packet(char_uuid: str, packet: bytes) -> None:
+            try:
+                await client.write_gatt_char(char_uuid, packet, response=False)
+            except Exception as exc:
+                print(f"  write without response failed on {char_uuid}: {exc}")
+                print("  retrying with response=True ...")
+                await client.write_gatt_char(char_uuid, packet, response=True)
+
+        async def wake_light() -> None:
+            print("\n--- Turning light ON (AE A1 FF FF FF 56 on aa61) ---")
+            await write_packet(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]))
+            await asyncio.sleep(1.5)
+
+        async def scan_channels(char_uuid: str, char_label: str, cw: int, ww: int) -> None:
+            print(f"\n=== {char_label}: AE AA [ch] {cw:02X} {ww:02X} 56 ===")
+            print("Watch for a visible CT change. Ctrl+C when you see it.\n")
+            sent_log = []
+            try:
+                for ch in range(256):
+                    packet = bytes([0xAE, 0xAA, ch, cw, ww, 0x56])
+                    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    line = f"  [{ts}] {char_label} ch=0x{ch:02X}  {hex_dump(packet)}"
+                    print(line)
+                    sent_log.append(line)
+                    await write_packet(char_uuid, packet)
+                    await asyncio.sleep(delay)
+            except KeyboardInterrupt:
+                print(f"\n*** Stopped at {char_label} ch=0x{ch:02X} ***")
+                print("--- Last 5 commands before Ctrl+C ---")
+                for entry in sent_log[-5:]:
+                    print(entry)
+                input("\nPress Enter to continue ...")
+
+        await wake_light()
+        await scan_channels(CHAR_CMD, "aa61 cool", 0x63, 0x00)
+        await wake_light()
+        await scan_channels(CHAR_CMD, "aa61 warm", 0x00, 0x63)
+        await wake_light()
+        await scan_channels(CHAR_FFF3, "fff3 cool", 0x63, 0x00)
+        await wake_light()
+        await scan_channels(CHAR_FFF3, "fff3 warm", 0x00, 0x63)
+
+        print("\nDone. Turning off ...")
+        await write_packet(CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]))
 
 
 async def cmd_auto_ct(address: str, delay: float = 1.5):
@@ -1773,6 +1847,11 @@ def main():
             print("Usage: debug_ble.py probe-ct ADDRESS")
             sys.exit(1)
         asyncio.run(cmd_probe_ct(sys.argv[2]))
+    elif command == "probe-ct-full":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py probe-ct-full ADDRESS")
+            sys.exit(1)
+        asyncio.run(cmd_probe_ct_full(sys.argv[2]))
     elif command == "probe-ct2":
         if len(sys.argv) < 3:
             print("Usage: debug_ble.py probe-ct2 ADDRESS")

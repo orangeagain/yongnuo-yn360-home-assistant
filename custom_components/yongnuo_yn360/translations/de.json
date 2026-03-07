@@ -20,10 +20,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Verbindungsverhalten",
-        "description": "Steuert, wie lange der gemeinsame BLE-Worker die aktuelle Leuchte fuer den naechsten Warteschlangen-Befehl verbunden haelt.",
+        "title": "Verbindung und Kanal",
+        "description": "Legt die BLE-Leerlauf-Trennzeit und den auf dieser Leuchte eingestellten Farbtemperatur-Kanal fest.",
         "data": {
-          "idle_disconnect_seconds": "Leerlauf-Trennzeit (Sekunden)"
+          "idle_disconnect_seconds": "Leerlauf-Trennzeit (Sekunden)",
+          "color_temp_channel": "Farbtemperatur-Kanal (dezimal 0-255)"
         }
       }
     }

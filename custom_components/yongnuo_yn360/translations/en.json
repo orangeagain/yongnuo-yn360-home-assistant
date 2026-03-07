@@ -20,10 +20,11 @@
   "options": {
     "step": {
       "init": {
-        "title": "Connection behavior",
-        "description": "Controls how long the shared BLE worker keeps the current lamp connected for the next queued command.",
+        "title": "Connection and channel",
+        "description": "Set the BLE idle disconnect delay and the color-temperature channel configured on this specific lamp.",
         "data": {
-          "idle_disconnect_seconds": "Idle disconnect delay (seconds)"
+          "idle_disconnect_seconds": "Idle disconnect delay (seconds)",
+          "color_temp_channel": "Color temp channel (decimal 0-255)"
         }
       }
     }
