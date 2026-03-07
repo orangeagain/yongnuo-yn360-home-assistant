@@ -3,7 +3,14 @@ from homeassistant.components.bluetooth import async_discovered_service_info
 from homeassistant.helpers import selector
 import voluptuous as vol
 
-from .const import CONF_ADDRESS, CONF_MODEL, DOMAIN
+from .const import (
+    CONF_ADDRESS,
+    CONF_IDLE_DISCONNECT_SECONDS,
+    CONF_MODEL,
+    DEFAULT_IDLE_DISCONNECT_SECONDS,
+    DOMAIN,
+    MAX_IDLE_DISCONNECT_SECONDS,
+)
 from .models import (
     get_discovery_name,
     get_discovery_info_for_address,
@@ -19,6 +26,10 @@ YONGNUO_SERVICE_UUIDS = {
 class YongnuoYn360ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     MINOR_VERSION = 0
+
+    @staticmethod
+    def async_get_options_flow(config_entry):
+        return YongnuoYn360OptionsFlow(config_entry)
 
     @staticmethod
     def _is_likely_yongnuo_device(info) -> bool:
@@ -98,4 +109,47 @@ class YongnuoYn360ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=schema,
             errors=errors,
+        )
+
+
+class YongnuoYn360OptionsFlow(config_entries.OptionsFlow):
+    def __init__(self, config_entry) -> None:
+        self._config_entry = config_entry
+
+    async def async_step_init(self, user_input=None):
+        if user_input is not None:
+            return self.async_create_entry(
+                title="",
+                data={
+                    CONF_IDLE_DISCONNECT_SECONDS: float(
+                        user_input[CONF_IDLE_DISCONNECT_SECONDS]
+                    )
+                },
+            )
+
+        idle_disconnect_seconds = float(
+            self._config_entry.options.get(
+                CONF_IDLE_DISCONNECT_SECONDS,
+                DEFAULT_IDLE_DISCONNECT_SECONDS,
+            )
+        )
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_IDLE_DISCONNECT_SECONDS,
+                    default=idle_disconnect_seconds,
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=MAX_IDLE_DISCONNECT_SECONDS,
+                        step=0.1,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
         )

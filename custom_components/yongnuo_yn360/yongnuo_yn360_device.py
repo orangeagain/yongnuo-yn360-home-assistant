@@ -11,7 +11,20 @@ from homeassistant.components.bluetooth import (
 )
 from homeassistant.core import HomeAssistant
 
-from .const import MAX_COLOR_TEMP_KELVIN, MAX_WHITE_LEVEL, MIN_COLOR_TEMP_KELVIN
+try:
+    from bleak_retry_connector import BleakClientWithServiceCache, establish_connection
+except ImportError:  # pragma: no cover - fallback for older HA runtimes
+    BleakClientWithServiceCache = BleakClient
+    establish_connection = None
+
+from .const import (
+    BLE_DISCONNECT_TIMEOUT_SECONDS,
+    BLE_SLOT_ACQUIRE_TIMEOUT_SECONDS,
+    DEFAULT_IDLE_DISCONNECT_SECONDS,
+    MAX_COLOR_TEMP_KELVIN,
+    MAX_WHITE_LEVEL,
+    MIN_COLOR_TEMP_KELVIN,
+)
 from .models import get_model_profile
 
 CHARACTERISTIC_UUID = "f000aa61-0451-4000-b000-000000000000"
@@ -27,12 +40,21 @@ class PendingCommand:
     packet: bytes
     reason: str
     seq: int
+    future: asyncio.Future[None]
 
 
 class YongnuoYn360Device:
     """YONGNUO BLE transport with persistent connection + high-speed coalescing."""
 
-    def __init__(self, hass: HomeAssistant, address: str, model: str):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        address: str,
+        model: str,
+        *,
+        slot_limiter: asyncio.Semaphore | None = None,
+        idle_disconnect_seconds: float = DEFAULT_IDLE_DISCONNECT_SECONDS,
+    ):
         self.hass = hass
         self.address = address
         self.profile = get_model_profile(model)
@@ -44,16 +66,21 @@ class YongnuoYn360Device:
         self._client: BleakClient | None = None
         self._ble_device = None
         self._conn_lock = asyncio.Lock()
+        self._slot_limiter = slot_limiter
+        self._slot_acquired = False
 
         self._coalesce_window = 0.02
         self._min_send_interval = 0.01
 
         self._seq = 0
 
-        self._idle_disconnect_seconds = 12.0
+        self._idle_disconnect_seconds = max(0.0, idle_disconnect_seconds)
         self._idle_disconnect_task: asyncio.Task | None = None
 
     async def async_shutdown(self) -> None:
+        if self._pending is not None and not self._pending.future.done():
+            self._pending.future.cancel()
+
         if self._worker_task and not self._worker_task.done():
             self._worker_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -74,6 +101,8 @@ class YongnuoYn360Device:
             )
 
     def _touch_idle_timer(self) -> None:
+        if self._idle_disconnect_seconds <= 0:
+            return
         if self._idle_disconnect_task and not self._idle_disconnect_task.done():
             self._idle_disconnect_task.cancel()
         self._idle_disconnect_task = asyncio.create_task(self._idle_disconnect_watchdog())
@@ -85,9 +114,15 @@ class YongnuoYn360Device:
         except asyncio.CancelledError:
             raise
 
-    def _enqueue_latest(self, packet: bytes, reason: str) -> None:
+    def _enqueue_latest(self, packet: bytes, reason: str) -> asyncio.Future[None]:
         self._seq += 1
-        self._pending = PendingCommand(packet=packet, reason=reason, seq=self._seq)
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+        if self._pending is not None and not self._pending.future.done():
+            # A newer command superseded this queued command before it was sent.
+            self._pending.future.set_result(None)
+
+        self._pending = PendingCommand(packet=packet, reason=reason, seq=self._seq, future=future)
         _LOGGER.debug(
             "Queue command for %s model=%s seq=%s reason=%s packet=%s",
             self.address,
@@ -98,6 +133,7 @@ class YongnuoYn360Device:
         )
         self._start_worker_if_needed()
         self._wake_event.set()
+        return future
 
     def _has_newer_command(self, seq: int) -> bool:
         return self._pending is not None and self._pending.seq > seq
@@ -124,9 +160,8 @@ class YongnuoYn360Device:
                         _hex(cmd.packet),
                     )
 
-                    if cmd.reason == "turn_off":
-                        await self._disconnect_client()
-                        _LOGGER.debug("Disconnected BLE after turn_off for %s", self.address)
+                    if not cmd.future.done():
+                        cmd.future.set_result(None)
                 except Exception as err:
                     if self._has_newer_command(cmd.seq) or self._wake_event.is_set():
                         _LOGGER.debug(
@@ -134,6 +169,8 @@ class YongnuoYn360Device:
                             self.address,
                             err,
                         )
+                        if not cmd.future.done():
+                            cmd.future.set_result(None)
                     else:
                         _LOGGER.warning(
                             "Command failed for %s (%s): %s",
@@ -141,8 +178,15 @@ class YongnuoYn360Device:
                             cmd.reason,
                             err,
                         )
+                        if not cmd.future.done():
+                            cmd.future.set_exception(err)
 
-                self._touch_idle_timer()
+                if cmd.reason == "turn_off" or self._idle_disconnect_seconds <= 0:
+                    await self._disconnect_client()
+                    if cmd.reason == "turn_off":
+                        _LOGGER.debug("Disconnected BLE after turn_off for %s", self.address)
+                else:
+                    self._touch_idle_timer()
                 await asyncio.sleep(self._min_send_interval)
 
     async def _resolve_ble_device(self):
@@ -171,32 +215,98 @@ class YongnuoYn360Device:
                 _LOGGER.debug("BLE client already connected for %s", self.address)
                 return self._client
 
-            ble_device = await self._resolve_ble_device()
-            if not ble_device:
-                raise RuntimeError(f"BLE device {self.address} not found or not connectable")
+            if self._client is not None and not self._client.is_connected:
+                self._client = None
+                self._release_connection_slot()
 
-            client = BleakClient(ble_device, timeout=4.0)
-            _LOGGER.debug(
-                "Connecting BLE client for %s model=%s name=%r",
-                self.address,
-                self.profile.label,
-                getattr(ble_device, "name", None),
-            )
-            await client.connect()
-            self._client = client
-            _LOGGER.debug("BLE client connected for %s", self.address)
-            return client
+            acquired_slot = False
+            if self._slot_limiter is not None and not self._slot_acquired:
+                _LOGGER.debug("Waiting for shared BLE connection slot for %s", self.address)
+                try:
+                    async with asyncio.timeout(BLE_SLOT_ACQUIRE_TIMEOUT_SECONDS):
+                        await self._slot_limiter.acquire()
+                except TimeoutError as err:
+                    raise RuntimeError(
+                        f"Timed out waiting for shared BLE connection slot for {self.address}"
+                    ) from err
+                self._slot_acquired = True
+                acquired_slot = True
+                _LOGGER.debug("Acquired shared BLE connection slot for %s", self.address)
+
+            try:
+                ble_device = await self._resolve_ble_device()
+                if ble_device is not None:
+                    client_name = getattr(ble_device, "name", None) or self.profile.label
+                    _LOGGER.debug(
+                        "Connecting BLE client for %s model=%s name=%r",
+                        self.address,
+                        self.profile.label,
+                        getattr(ble_device, "name", None),
+                    )
+                    if establish_connection is not None:
+                        client = await establish_connection(
+                            BleakClientWithServiceCache,
+                            ble_device,
+                            client_name,
+                            max_attempts=4,
+                            timeout=4.0,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "bleak-retry-connector unavailable for %s, falling back to BleakClient.connect()",
+                            self.address,
+                        )
+                        client = BleakClient(ble_device, timeout=4.0)
+                        await client.connect()
+                else:
+                    _LOGGER.warning(
+                        "BLE device %s missing from HA discovery cache; falling back to direct-address connect",
+                        self.address,
+                    )
+                    client = BleakClient(self.address, timeout=4.0)
+                    await client.connect()
+                self._client = client
+                _LOGGER.debug("BLE client connected for %s", self.address)
+                return client
+            except Exception:
+                if acquired_slot:
+                    self._release_connection_slot()
+                raise
 
     async def _disconnect_client(self) -> None:
         async with self._conn_lock:
             if self._client is None:
+                self._release_connection_slot()
                 return
             try:
                 if self._client.is_connected:
                     _LOGGER.debug("Disconnecting BLE client for %s", self.address)
-                    await self._client.disconnect()
+                    try:
+                        async with asyncio.timeout(BLE_DISCONNECT_TIMEOUT_SECONDS):
+                            await self._client.disconnect()
+                    except TimeoutError:
+                        _LOGGER.warning(
+                            "Timed out disconnecting BLE client for %s after %.1fs",
+                            self.address,
+                            BLE_DISCONNECT_TIMEOUT_SECONDS,
+                        )
+                    except Exception as err:
+                        _LOGGER.debug(
+                            "Ignoring disconnect error for %s: %s",
+                            self.address,
+                            err,
+                        )
             finally:
                 self._client = None
+                self._release_connection_slot()
+
+    def _release_connection_slot(self) -> None:
+        if self._slot_limiter is None or not self._slot_acquired:
+            return
+
+        self._slot_limiter.release()
+        self._slot_acquired = False
+        _LOGGER.debug("Released shared BLE connection slot for %s", self.address)
 
     async def _send_once(self, data: bytes) -> None:
         client = await self._ensure_connected()
@@ -318,17 +428,24 @@ class YongnuoYn360Device:
         return packet
 
     async def set_rgb(self, r: int, g: int, b: int, brightness: int) -> None:
-        self._enqueue_latest(self._build_rgb_packet(r, g, b, brightness), reason="set_rgb")
+        await self._enqueue_latest(
+            self._build_rgb_packet(r, g, b, brightness),
+            reason="set_rgb",
+        )
 
     async def set_color(self, r: int, g: int, b: int, brightness: int) -> None:
         await self.set_rgb(r, g, b, brightness)
 
     async def set_color_temperature(self, color_temp_kelvin: int, brightness: int) -> None:
-        self._enqueue_latest(
+        await self._enqueue_latest(
             self._build_color_temp_packet(color_temp_kelvin, brightness),
             reason="set_color_temperature",
         )
 
+    async def wake_up(self) -> None:
+        packet = struct.pack(">BBBBBB", 0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56)
+        await self._enqueue_latest(packet, reason="wake_up")
+
     async def turn_off(self) -> None:
         packet = struct.pack(">BBBBBB", 0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56)
-        self._enqueue_latest(packet, reason="turn_off")
+        await self._enqueue_latest(packet, reason="turn_off")

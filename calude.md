@@ -48,18 +48,14 @@ custom_components/yongnuo_yn360/
 - YN360 uses channel=0x01, YN150 Ultra RGB uses channel=0x00, YN150WY uses channel=0x0A
 - CW/WW values range 0-99 (0x63 = max), NOT 0-255. Values > 99 are ignored
 - On YN150WY, `AE A1` turns the light on but RGB values are ignored (no RGB LEDs)
-- On YN150WY, a practical turn-on sequence from OFF is: send `AE A1 FF FF FF 56`, wait briefly (`0.5-1.0s` tested), then send `AE AA 0A CW WW 56`
 - Reference: [Samuel Pinches YN360 BLE reverse engineering](https://samuelpinches.com.au/hacking/hacking-yn360-light-wand/), [kenkeiter/lantern](https://github.com/kenkeiter/lantern)
 
 ## Architecture
 
 - Per-device persistent BLE connection via `bleak.BleakClient`
-- In Home Assistant, prefer `bleak_retry_connector.establish_connection()` over raw `BleakClient.connect()` to avoid backend/connection-slot failures
 - Async worker task per device, coalesces rapid updates (latest-command-wins)
-- State updates should await actual worker completion; optimistic state changes can mask failed BLE writes
 - Retry policy: no retry during high-speed stream, retry only for final (quiet) command
 - Idle disconnect after 12s; immediate disconnect after turn_off for mobile app coexistence
-- Disconnect cleanup may raise `EOFError` on some HA/BlueZ paths; treat it as a cleanup issue, not a command failure
 - Brightness: HA 0-255 remapped to 0-100%, applied as RGB scaling (no separate brightness command)
 
 ## Key Dependencies
@@ -112,7 +108,6 @@ YN150Ultra RGB supports both RGB and color temperature (has both RGB and CW/WW L
   - `AE AA 0A 63 00 56` - cool white max: OK
   - `AE AA 0A 00 63 56` - warm white max: OK
 - CW/WW range: 0-99 (0x00-0x63). Values 0xFF ignored by device
-- Practical HA integration note: when the light is OFF, sending only `AE AA 0A CW WW 56` may not visibly wake the lamp; reliable behavior was `AE A1 FF FF FF 56`, wait about `0.5s`, then `AE AA 0A CW WW 56`
 
 ### Remaining Work
 

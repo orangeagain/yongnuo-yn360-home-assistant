@@ -1,8 +1,8 @@
+import asyncio
 import logging
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_COLOR_TEMP,
     ATTR_COLOR_TEMP_KELVIN,
     ATTR_RGB_COLOR,
     ColorMode,
@@ -14,7 +14,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_ADDRESS,
+    CONF_IDLE_DISCONNECT_SECONDS,
     CONF_MODEL,
+    DATA_BLE_SLOT_SEMAPHORE,
+    DEFAULT_IDLE_DISCONNECT_SECONDS,
     DOMAIN,
     MAX_COLOR_TEMP_KELVIN,
     MIN_COLOR_TEMP_KELVIN,
@@ -29,10 +32,6 @@ def remap_brightness(value: int) -> int:
     return max(1, min(100, round((value / 255) * 100)))
 
 
-def mired_to_kelvin(value: int) -> int:
-    return round(1_000_000 / max(value, 1))
-
-
 def clamp_kelvin(value: int) -> int:
     return min(max(value, MIN_COLOR_TEMP_KELVIN), MAX_COLOR_TEMP_KELVIN)
 
@@ -41,11 +40,24 @@ class YongnuoLight(LightEntity):
     _attr_has_entity_name = True
     _attr_icon = "mdi:led-strip"
 
-    def __init__(self, hass: HomeAssistant, address: str, model: str):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        address: str,
+        model: str,
+        slot_limiter: asyncio.Semaphore,
+        idle_disconnect_seconds: float,
+    ):
         self._address = address
         self._profile = get_model_profile(model)
         self._attr_unique_id = f"yongnuo_{self._address.replace(':', '').lower()}"
-        self._device = YongnuoYn360Device(hass, address, self._profile.key)
+        self._device = YongnuoYn360Device(
+            hass,
+            address,
+            self._profile.key,
+            slot_limiter=slot_limiter,
+            idle_disconnect_seconds=idle_disconnect_seconds,
+        )
         self._is_on = False
         self._rgb_color = (255, 255, 255)
         self._brightness = 255
@@ -54,11 +66,12 @@ class YongnuoLight(LightEntity):
             ColorMode.RGB if self._profile.supports_rgb else ColorMode.COLOR_TEMP
         )
         _LOGGER.debug(
-            "Initialized light entity for %s with model=%s rgb=%s ct=%s",
+            "Initialized light entity for %s with model=%s rgb=%s ct=%s idle_disconnect_seconds=%.1f",
             self._address,
             self._profile.label,
             self._profile.supports_rgb,
             self._profile.supports_color_temp,
+            idle_disconnect_seconds,
         )
 
     @property
@@ -137,13 +150,19 @@ class YongnuoLight(LightEntity):
             if ATTR_COLOR_TEMP_KELVIN in kwargs:
                 self._color_temp_kelvin = clamp_kelvin(kwargs[ATTR_COLOR_TEMP_KELVIN])
                 self._color_mode = ColorMode.COLOR_TEMP
-            elif ATTR_COLOR_TEMP in kwargs:
-                self._color_temp_kelvin = clamp_kelvin(mired_to_kelvin(kwargs[ATTR_COLOR_TEMP]))
-                self._color_mode = ColorMode.COLOR_TEMP
 
         brightness_pct = remap_brightness(self._brightness)
 
         if self._color_mode == ColorMode.COLOR_TEMP and self._profile.supports_color_temp:
+            if not self._is_on and not self._profile.supports_rgb:
+                _LOGGER.debug(
+                    "Waking color-temp-only light %s model=%s before CT command",
+                    self._address,
+                    self._profile.label,
+                )
+                await self._device.wake_up()
+                # YN150WY needs a brief settle time after A1 before AA CT packets apply.
+                await asyncio.sleep(0.5)
             _LOGGER.debug(
                 "Applying color temperature to %s model=%s kelvin=%s brightness_pct=%s",
                 self._address,
@@ -186,6 +205,28 @@ async def async_setup_entry(
     model = entry_data.get(CONF_MODEL)
     if not model:
         model = await async_guess_model_for_address(hass, address)
+    idle_disconnect_seconds = float(
+        entry.options.get(
+            CONF_IDLE_DISCONNECT_SECONDS,
+            DEFAULT_IDLE_DISCONNECT_SECONDS,
+        )
+    )
+    slot_limiter = hass.data[DOMAIN][DATA_BLE_SLOT_SEMAPHORE]
 
-    _LOGGER.debug("Setting up light entry %s with model=%s", address, get_model_profile(model).label)
-    async_add_entities([YongnuoLight(hass, address, model)])
+    _LOGGER.debug(
+        "Setting up light entry %s with model=%s idle_disconnect_seconds=%.1f",
+        address,
+        get_model_profile(model).label,
+        idle_disconnect_seconds,
+    )
+    async_add_entities(
+        [
+            YongnuoLight(
+                hass,
+                address,
+                model,
+                slot_limiter,
+                idle_disconnect_seconds,
+            )
+        ]
+    )

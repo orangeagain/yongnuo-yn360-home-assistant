@@ -39,7 +39,7 @@ MODEL_PROFILES: dict[str, YongnuoModelProfile] = {
         device_model="YN150 WY bi-color LED video light",
         supports_rgb=False,
         supports_color_temp=True,
-        color_temp_channel=0x09,
+        color_temp_channel=0x0A,
     ),
     MODEL_YN150RGB: YongnuoModelProfile(
         key=MODEL_YN150RGB,

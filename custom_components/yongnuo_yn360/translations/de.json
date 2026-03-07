@@ -16,5 +16,16 @@
     "abort": {
       "already_configured": "Diese Leuchte ist bereits konfiguriert."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Verbindungsverhalten",
+        "description": "Kuerzere Leerlauf-Trennzeiten geben knappe Bluetooth-Verbindungsslots auf HAOS-Servern schneller frei.",
+        "data": {
+          "idle_disconnect_seconds": "Leerlauf-Trennzeit (Sekunden)"
+        }
+      }
+    }
   }
 }

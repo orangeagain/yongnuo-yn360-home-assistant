@@ -43,7 +43,7 @@ Color temperature support was added with per-model channel mapping:
 
 - `YN360` -> channel `0x01`
 - `YN150RGB` -> channel `0x00`
-- `YN150` -> channel `0x09`
+- `YN150` -> channel `0x0A`
 
 Packet format:
 
@@ -256,7 +256,7 @@ Channel mapping:
 
 - `YN360` -> `0x01`
 - `YN150RGB` -> `0x00`
-- `YN150` -> `0x09`
+- `YN150` -> `0x0A`
 
 ## Deployment and Runtime Notes
 

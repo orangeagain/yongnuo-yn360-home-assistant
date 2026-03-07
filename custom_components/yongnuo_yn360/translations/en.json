@@ -16,5 +16,16 @@
     "abort": {
       "already_configured": "This light is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Connection behavior",
+        "description": "Shorter idle disconnect delays free scarce Bluetooth connection slots faster on HAOS servers.",
+        "data": {
+          "idle_disconnect_seconds": "Idle disconnect delay (seconds)"
+        }
+      }
+    }
   }
 }

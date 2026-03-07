@@ -6,6 +6,7 @@ Usage:
   python debug_ble.py services ADDRESS  # List all GATT services/characteristics
   python debug_ble.py sniff ADDRESS     # Subscribe to all notify/indicate characteristics
   python debug_ble.py write ADDRESS UUID HEX  # Write raw hex bytes to a characteristic
+  python debug_ble.py wy-ct ADDRESS [CHANNEL]  # Fixed CT sequence: OFF -> WAKE -> COOL -> WARM (default CH=0A)
   python debug_ble.py probe ADDRESS     # Try command types A0-AF interactively
   python debug_ble.py rainbow ADDRESS [FPS,FPS,...]  # Visual FPS test: find the real frame rate limit
   python debug_ble.py parallel ADDR,MODE,FPS [ADDR,MODE,FPS ...]  # Multi-light parallel test
@@ -16,6 +17,7 @@ Examples:
   python debug_ble.py services AA:BB:CC:DD:EE:FF
   python debug_ble.py sniff AA:BB:CC:DD:EE:FF
   python debug_ble.py write AA:BB:CC:DD:EE:FF f000aa61-0451-4000-b000-000000000000 AEA1FF000056
+  python debug_ble.py wy-ct D0:32:34:39:74:49
   python debug_ble.py probe AA:BB:CC:DD:EE:FF
   python debug_ble.py rainbow DB:B9:85:86:42:60 200,300,400,500
   python debug_ble.py parallel DB:B9:85:86:42:60,rgb,300 D0:32:34:39:6D:6F,rgb,300 D0:32:34:39:74:49,ct,100
@@ -113,8 +115,57 @@ async def cmd_write(address: str, uuid: str, hex_str: str):
         print("Done.")
 
 
+async def cmd_wy_ct(address: str, channel: int = 0x0A):
+    """Run a fixed color-temperature sequence in one connection."""
+    print(f"Connecting to {address} ...")
+    async with BleakClient(address, timeout=20.0) as client:
+        print(f"Connected: {client.is_connected}")
+
+        async def send(label: str, packet: bytes, hold: float) -> None:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            print(f"[{ts}] -> {label}: {hex_dump(packet)}")
+            await client.write_gatt_char(CHAR_CMD, packet, response=False)
+            await asyncio.sleep(hold)
+
+        await send("OFF", bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), 1.5)
+        await send("WAKE", bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), 2.0)
+        await send(
+            f"COOL ch=0x{channel:02X}",
+            bytes([0xAE, 0xAA, channel, 0x63, 0x00, 0x56]),
+            5.0,
+        )
+        await send(
+            f"WARM ch=0x{channel:02X}",
+            bytes([0xAE, 0xAA, channel, 0x00, 0x63, 0x56]),
+            0.5,
+        )
+        print(f"Sequence complete. Light left ON at WARM ch=0x{channel:02X}.")
+
+
 CHAR_CMD = "f000aa61-0451-4000-b000-000000000000"
 CHAR_NOTIFY = "f000aa63-0451-4000-b000-000000000000"
+GAP_DEVICE_NAME = "00002a00-0000-1000-8000-00805f9b34fb"
+
+
+def detect_model_from_name(name: str | None) -> tuple[str, int, bool]:
+    """Returns (model_name, ct_channel, has_rgb)."""
+    if not name:
+        return ("Unknown (YN360?)", 0x01, True)
+
+    normalized = "".join(ch for ch in name.upper() if ch.isalnum())
+    if "150" in normalized and "WY" in normalized:
+        return ("YN150WY", 0x0A, False)
+    if "150" in normalized:
+        return ("YN150Ultra RGB", 0x00, True)
+    return ("YN360", 0x01, True)
+
+
+async def read_device_name(client: BleakClient) -> str | None:
+    try:
+        name_bytes = await client.read_gatt_char(GAP_DEVICE_NAME)
+    except Exception:
+        return None
+    return name_bytes.decode("utf-8", errors="replace")
 
 
 async def cmd_rainbow(address: str, fps_list: list[int] | None = None):
@@ -223,13 +274,13 @@ async def cmd_test_wy(address: str):
             ("A1: R=63 G=63 B=00  (both 99)",        [0xAE, 0xA1, 0x63, 0x63, 0x00, 0x56]),
 
             # Group C: AA with light ON (retry)
-            ("AA: ch=01 cool=63 warm=00",            [0xAE, 0xAA, 0x01, 0x63, 0x00, 0x56]),
-            ("AA: ch=01 cool=00 warm=63",            [0xAE, 0xAA, 0x01, 0x00, 0x63, 0x56]),
+            ("AA: ch=0A cool=63 warm=00",            [0xAE, 0xAA, 0x0A, 0x63, 0x00, 0x56]),
+            ("AA: ch=0A cool=00 warm=63",            [0xAE, 0xAA, 0x0A, 0x00, 0x63, 0x56]),
             ("AA: ch=00 cool=63 warm=00",            [0xAE, 0xAA, 0x00, 0x63, 0x00, 0x56]),
-            ("AA: ch=02 cool=63 warm=00",            [0xAE, 0xAA, 0x02, 0x63, 0x00, 0x56]),
+            ("AA: ch=01 cool=63 warm=00",            [0xAE, 0xAA, 0x01, 0x63, 0x00, 0x56]),
 
             # Group D: Try fff3 for color temp
-            ("fff3: AA ch=01 cool=63 warm=00",       "fff3"),
+            ("fff3: AA ch=0A cool=63 warm=00",       "fff3"),
             ("fff3: A1 R=63 G=00 B=00",             "fff3-a1"),
 
             # Group E: Query state - write then read
@@ -250,7 +301,7 @@ async def cmd_test_wy(address: str):
                 continue
 
             if packet == "fff3":
-                p = bytes([0xAE, 0xAA, 0x01, 0x63, 0x00, 0x56])
+                p = bytes([0xAE, 0xAA, 0x0A, 0x63, 0x00, 0x56])
                 print(f"  -> fff3: {hex_dump(p)}")
                 await client.write_gatt_char(CHAR_FFF3, p, response=False)
             elif packet == "fff3-a1":
@@ -622,7 +673,7 @@ async def cmd_probe_ct_ch(address: str):
 
 
 async def cmd_auto_ct(address: str, delay: float = 1.5):
-    """Automatic color temperature test - cycles CW/WW on both channel 0x00 and 0x01."""
+    """Automatic color temperature test - cycles CW/WW on YN150WY(0x0A) and YN360(0x01)."""
     print(f"Connecting to {address} ...")
     async with BleakClient(address, timeout=10.0) as client:
         print(f"Connected: {client.is_connected}")
@@ -650,7 +701,7 @@ async def cmd_auto_ct(address: str, delay: float = 1.5):
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
         await asyncio.sleep(1.0)
 
-        for ch, ch_name in [(0x00, "YN150WY"), (0x01, "YN360")]:
+        for ch, ch_name in [(0x0A, "YN150WY"), (0x01, "YN360")]:
             print(f"\n{'='*60}")
             print(f"  Channel 0x{ch:02X} ({ch_name})")
             print(f"{'='*60}")
@@ -740,7 +791,7 @@ async def cmd_auto_test(address: str, delay: float = 1.5):
         await client.write_gatt_char(CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]), response=False)
         await asyncio.sleep(1.0)
 
-        for ch, ch_name in [(0x00, "YN150WY"), (0x01, "YN360")]:
+        for ch, ch_name in [(0x0A, "YN150WY"), (0x01, "YN360")]:
             print(f"\n{'─'*60}")
             print(f"  Channel 0x{ch:02X} ({ch_name})")
             print(f"{'─'*60}")
@@ -1177,15 +1228,17 @@ async def cmd_parallel(lights_config: list[tuple[str, str, int]]):
     RED = bytes([0xAE, 0xA1, 0xFF, 0x00, 0x00, 0x56])
     BLUE = bytes([0xAE, 0xA1, 0x00, 0x00, 0xFF, 0x56])
     GREEN = bytes([0xAE, 0xA1, 0x00, 0xFF, 0x00, 0x56])
-    CT_COOL = bytes([0xAE, 0xAA, 0x00, 0x63, 0x00, 0x56])  # cool white max
-    CT_WARM = bytes([0xAE, 0xAA, 0x00, 0x00, 0x63, 0x56])  # warm white max
     OFF = bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56])
 
     def make_rgb_stripe(frame):
         return RED if (frame // STRIPE_FRAMES) % 2 == 0 else BLUE
 
-    def make_ct_stripe(frame):
-        return CT_COOL if (frame // STRIPE_FRAMES) % 2 == 0 else CT_WARM
+    def make_ct_stripe(frame, channel):
+        return (
+            bytes([0xAE, 0xAA, channel, 0x63, 0x00, 0x56])
+            if (frame // STRIPE_FRAMES) % 2 == 0
+            else bytes([0xAE, 0xAA, channel, 0x00, 0x63, 0x56])
+        )
 
     # ── Connect to all lights ──
     print(f"\nConnecting to {len(lights_config)} lights...")
@@ -1193,22 +1246,31 @@ async def cmd_parallel(lights_config: list[tuple[str, str, int]]):
     lights = []
     try:
         for addr, mode, fps in lights_config:
-            label = f"{'RGB' if mode == 'rgb' else 'CT'} @ {fps}fps"
-            print(f"  {addr}  ({label})...", end="", flush=True)
+            print(f"  {addr}  ({'RGB' if mode == 'rgb' else 'CT'} @ {fps}fps)...", end="", flush=True)
             client = BleakClient(addr, timeout=10.0)
             await client.connect()
-            print(" OK")
+            dev_name = await read_device_name(client)
+            model, ct_ch, _ = detect_model_from_name(dev_name)
+            label = f"{'RGB' if mode == 'rgb' else f'CT ch=0x{ct_ch:02X}'} @ {fps}fps"
+            print(f" OK  name={dev_name!r}  model={model}  {label}")
             clients.append(client)
 
             total = int(fps * SEND_DURATION)
             lights.append({
                 "client": client,
                 "addr": addr,
+                "name": dev_name,
+                "model": model,
+                "ct_ch": ct_ch,
                 "mode": mode,
                 "fps": fps,
                 "total": total,
                 "interval": 1.0 / fps,
-                "make_packet": make_rgb_stripe if mode == "rgb" else make_ct_stripe,
+                "make_packet": (
+                    make_rgb_stripe
+                    if mode == "rgb"
+                    else (lambda frame, channel=ct_ch: make_ct_stripe(frame, channel))
+                ),
             })
 
         # ── Turn all on ──
@@ -1228,8 +1290,12 @@ async def cmd_parallel(lights_config: list[tuple[str, str, int]]):
         print("=" * 64)
         for i, light in enumerate(lights):
             print(f"  Light {i+1}: {light['addr']}")
-            print(f"           {light['mode'].upper()} @ {light['fps']} fps"
-                  f" ({light['total']} commands)")
+            detail = (
+                f"{light['mode'].upper()} @ {light['fps']} fps"
+                if light["mode"] == "rgb"
+                else f"CT ch=0x{light['ct_ch']:02X} @ {light['fps']} fps"
+            )
+            print(f"           {detail} ({light['total']} commands)")
         print(f"  Total: {total_cmds} commands")
         print()
         print("  After sending, OFF is sent to all lights.")
@@ -1500,7 +1566,7 @@ async def cmd_sync(addresses: list[str]):
     """Sync test: connect to multiple lights simultaneously, show CW/WW/RGB together.
 
     Auto-detects model by BLE device name to use the correct color temp channel:
-      - YN150WY -> channel 0x09
+      - YN150WY -> channel 0x0A
       - YN150Ultra RGB -> channel 0x00
       - YN360 (or unknown) -> channel 0x01
     """
@@ -1514,17 +1580,6 @@ async def cmd_sync(addresses: list[str]):
     if not addresses:
         addresses = DEFAULT_ADDRS
 
-    def detect_model(name: str | None) -> tuple[str, int, bool]:
-        """Returns (model_name, ct_channel, has_rgb)."""
-        if not name:
-            return ("Unknown (YN360?)", 0x01, True)
-        n = "".join(ch for ch in name.upper() if ch.isalnum())
-        if "150" in n and "WY" in n:
-            return ("YN150WY", 0x09, False)
-        if "150" in n:
-            return ("YN150Ultra RGB", 0x00, True)
-        return ("YN360", 0x01, True)
-
     HOLD = 3.0  # seconds to hold each test phase
 
     print(f"\nConnecting to {len(addresses)} lights...")
@@ -1536,15 +1591,8 @@ async def cmd_sync(addresses: list[str]):
             print(f"  {addr} ...", end="", flush=True)
             client = BleakClient(addr, timeout=10.0)
             await client.connect()
-            # Read device name from BLE
-            dev_name = None
-            try:
-                # Try reading GAP device name characteristic
-                name_bytes = await client.read_gatt_char("00002a00-0000-1000-8000-00805f9b34fb")
-                dev_name = name_bytes.decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            model, ct_ch, has_rgb = detect_model(dev_name)
+            dev_name = await read_device_name(client)
+            model, ct_ch, has_rgb = detect_model_from_name(dev_name)
             print(f" OK  name={dev_name!r}  model={model}  ct_ch=0x{ct_ch:02X}  rgb={has_rgb}")
             clients.append(client)
             lights.append({
@@ -1707,6 +1755,14 @@ def main():
             print("Usage: debug_ble.py write ADDRESS UUID HEX")
             sys.exit(1)
         asyncio.run(cmd_write(sys.argv[2], sys.argv[3], sys.argv[4]))
+    elif command == "wy-ct":
+        if len(sys.argv) < 3:
+            print("Usage: debug_ble.py wy-ct ADDRESS [CHANNEL]")
+            sys.exit(1)
+        channel = 0x0A
+        if len(sys.argv) >= 4:
+            channel = int(sys.argv[3], 16)
+        asyncio.run(cmd_wy_ct(sys.argv[2], channel))
     elif command == "probe":
         if len(sys.argv) < 3:
             print("Usage: debug_ble.py probe ADDRESS")
