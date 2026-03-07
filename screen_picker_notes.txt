@@ -1,0 +1,82 @@
+Screen Color Picker 方案记录
+============================
+
+一、方案概览
+-----------
+
+功能：实时拾取屏幕上鼠标所指像素的颜色，通过 BLE 发送给 YN RGB 灯，
+     使灯的颜色跟随屏幕内容实时变化。
+
+架构（三线程并行）：
+
+  Thread A (dxcam)   ─→ DXGI Desktop Duplication 捕获屏幕帧（60 FPS）
+                         存入共享变量 _frame
+
+  Thread B (sampler) ─→ 从 _frame 中读取鼠标位置像素颜色（60 FPS）
+                         存入共享变量 latest_rgb（tuple）
+
+  Main loop (BLE)    ─→ 读取 latest_rgb，发送 BLE 命令（~200 FPS）
+                         使用 asyncio.sleep 节流，response=False
+
+关键设计决策：
+  - dxcam 必须在独立线程中 import 和运行（COM STA/MTA 冲突）
+  - BLE 连接先于 dxcam 建立（避免 COM 污染主线程）
+  - 截图与 BLE 发送完全解耦，互不干扰
+  - BLE 自动重连（最多 3 次，递增退避）
+  - Windows 定时器精度通过 timeBeginPeriod(1) 提升到 1ms
+  - DPI 感知，确保鼠标坐标对应物理像素
+
+依赖：bleak, dxcam
+
+用法：python screen_picker.py <BLE_ADDRESS>
+
+
+二、遇到的问题及解决
+-------------------
+
+1. COM 线程模型冲突
+   问题：import dxcam 在主线程初始化 COM 为 STA，bleak (WinRT) 需要 MTA，
+        导致 BleakError: "Thread is configured for Windows GUI but
+        callbacks are not working"
+   解决：dxcam 的 import 和所有操作都移到独立 daemon 线程内，
+        主线程只运行 bleak
+
+2. BLE 连接断开（缓冲区溢出）
+   问题：write_gatt_char(response=False) 只入队不等确认，主循环无间隔地
+        写入，以 5000+ fps 灌满 OS BLE 发送缓冲区，导致连接崩溃
+   解决：添加 asyncio.sleep(0.005) 节流（~200 fps），保持缓冲区浅层
+        （0-1 条待发命令）
+
+3. busy_wait_until 阻塞事件循环
+   问题：rainbow 测试中使用的 busy_wait 精确计时法，在 async 上下文中
+        会阻塞 asyncio 事件循环，导致 BLE 回调无法处理，write_gatt_char
+        的 await 变得极慢（实测仅 17 fps）
+   解决：改用 asyncio.sleep 节流，配合 timeBeginPeriod(1) 提升精度
+
+4. response=True 导致卡死
+   问题：尝试用 response=True 实现自然背压（等设备确认再发下一条），
+        但灯的 GATT 特征 f000aa61 可能不支持 Write With Response，
+        await 永远等不到确认，程序卡住，FPS 显示不更新
+   解决：回退到 response=False + asyncio.sleep 节流
+
+5. 命令积压（buffer backlog）
+   问题：response=False 下每帧都发送（即使颜色不变），发送速率超过设备
+        实际处理速率，多余命令积压在 OS 缓冲区。鼠标停下后灯还在播放
+        旧颜色序列
+   解决：用合理的发送间隔（5ms）控制入队速率，使其不超过设备消费速率
+
+6. 截图线程拖慢 BLE 发送
+   问题：最初 dxcam 帧读取和 BLE 发送在同一个 async 循环中，
+        numpy 数组访问耗时拖慢了整个循环（实测 BLE 仅 14-17 fps）
+   解决：拆分为三线程架构——dxcam 捕获、像素取色、BLE 发送完全独立，
+        主循环只读一个 tuple（零开销）
+
+7. 固件 PWM 渐变（硬件限制，未解决）
+   问题：切换颜色时灯的亮度缓慢提升（颜色立即变化但亮度渐变），
+        测试排除了 LED 开关延迟（RGB_FLOOR=3 仍有渐变），
+        也排除了发送频率不足（200fps 仍有渐变）
+   结论：YN150/YN360 固件内置 PWM 平滑过渡算法，每收到新目标颜色后
+        会用数十毫秒渐变到目标亮度。rainbow 测试中红蓝高速交替无渐变，
+        是因为固件来不及完成渐变就被下一帧覆盖；screen picker 中鼠标
+        停在新颜色后持续发送同一目标，固件有充足时间执行完整渐变。
+        这是硬件行为，软件无法绕过。
