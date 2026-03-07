@@ -1,6 +1,6 @@
 - id: "yongnuo_sunrise_two_hour_serial"
   alias: "Yongnuo sunrise two-hour serial ramp"
-  description: "At sunrise, ramp three Yongnuo lights linearly over two hours with 30-second serialized updates."
+  description: "At sunrise, ramp three Yongnuo lights linearly over two hours using the configurable serial delay helper."
   trigger:
     - platform: sun
       event: sunrise
@@ -9,4 +9,18 @@
     - service: script.turn_on
       target:
         entity_id: script.yongnuo_sunrise_two_hour_serial
+  mode: single
+
+- id: "yongnuo_sunset_two_hour_serial_reverse"
+  alias: "Yongnuo sunset two-hour serial reverse ramp"
+  description: "Two hours before sunset, ramp three Yongnuo lights down to simulate sunset using the configurable serial delay helper."
+  trigger:
+    - platform: sun
+      event: sunset
+      offset: "-02:00:00"
+  condition: []
+  action:
+    - service: script.turn_on
+      target:
+        entity_id: script.yongnuo_sunset_two_hour_serial
   mode: single

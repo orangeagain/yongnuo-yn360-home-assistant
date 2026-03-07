@@ -3,35 +3,126 @@ yongnuo_sunrise_two_hour_serial:
   mode: restart
   sequence:
     - variables:
-        total_rounds: 80
+        total_seconds: 7200
+        light_count: 3
         min_kelvin: 2000
         max_kelvin: 10000
+        delay_seconds: >-
+          {{ [10, (states('input_number.yongnuo_serial_delay_seconds') | float(30)) | round(0, 'floor') | int] | max }}
+    - variables:
+        total_rounds: >-
+          {{ [1, (total_seconds / ((delay_seconds | int) * light_count)) | round(0, 'floor') | int] | max }}
     - repeat:
         count: "{{ total_rounds }}"
         sequence:
           - variables:
               brightness_pct: >-
-                {{ [1, ((repeat.index * 100 / total_rounds) | round(0, 'floor') | int)] | max }}
+                {{ [1, ((repeat.index * 100 / (total_rounds | int)) | round(0, 'floor') | int)] | max }}
               color_temp_kelvin: >-
-                {{ (min_kelvin + ((max_kelvin - min_kelvin) * repeat.index / total_rounds)) | round(0) | int }}
+                {{ (min_kelvin + ((max_kelvin - min_kelvin) * repeat.index / (total_rounds | int))) | round(0) | int }}
           - service: light.turn_on
             target:
               entity_id: light.yn360_led_video_light_d0_32_34_39_6d_6f
             data:
               brightness_pct: "{{ brightness_pct }}"
               color_temp_kelvin: "{{ color_temp_kelvin }}"
-          - delay: "00:00:30"
+          - delay:
+              seconds: "{{ delay_seconds | int }}"
           - service: light.turn_on
             target:
               entity_id: light.yn360_led_video_light_db_b9_85_86_42_60
             data:
               brightness_pct: "{{ brightness_pct }}"
               color_temp_kelvin: "{{ color_temp_kelvin }}"
-          - delay: "00:00:30"
+          - delay:
+              seconds: "{{ delay_seconds | int }}"
           - service: light.turn_on
             target:
               entity_id: light.yn360_led_video_light_d0_32_34_39_74_49
             data:
               brightness_pct: "{{ brightness_pct }}"
               color_temp_kelvin: "{{ color_temp_kelvin }}"
-          - delay: "00:00:30"
+          - delay:
+              seconds: "{{ delay_seconds | int }}"
+
+yongnuo_sunset_two_hour_serial:
+  alias: "Yongnuo sunset two-hour serial"
+  mode: restart
+  sequence:
+    - variables:
+        total_seconds: 7200
+        light_count: 3
+        min_kelvin: 2000
+        max_kelvin: 10000
+        delay_seconds: >-
+          {{ [10, (states('input_number.yongnuo_serial_delay_seconds') | float(30)) | round(0, 'floor') | int] | max }}
+    - variables:
+        total_rounds: >-
+          {{ [2, (total_seconds / ((delay_seconds | int) * light_count)) | round(0, 'floor') | int] | max }}
+    - variables:
+        numeric_rounds: >-
+          {{ [1, (total_rounds | int) - 1] | max }}
+    - repeat:
+        count: "{{ total_rounds }}"
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ repeat.index < (total_rounds | int) }}"
+                sequence:
+                  - variables:
+                      brightness_pct: >-
+                        {% if (numeric_rounds | int) <= 1 %}
+                          100
+                        {% else %}
+                          {{ [1, ((100 * ((numeric_rounds | int) - repeat.index) / ((numeric_rounds | int) - 1)) | round(0) | int)] | max }}
+                        {% endif %}
+                      color_temp_kelvin: >-
+                        {% if (numeric_rounds | int) <= 1 %}
+                          {{ max_kelvin }}
+                        {% else %}
+                          {{ (min_kelvin + ((max_kelvin - min_kelvin) * ((numeric_rounds | int) - repeat.index) / ((numeric_rounds | int) - 1))) | round(0) | int }}
+                        {% endif %}
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.yn360_led_video_light_d0_32_34_39_6d_6f
+                    data:
+                      brightness_pct: "{{ brightness_pct }}"
+                      color_temp_kelvin: "{{ color_temp_kelvin }}"
+                  - delay:
+                      seconds: "{{ delay_seconds | int }}"
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.yn360_led_video_light_db_b9_85_86_42_60
+                    data:
+                      brightness_pct: "{{ brightness_pct }}"
+                      color_temp_kelvin: "{{ color_temp_kelvin }}"
+                  - delay:
+                      seconds: "{{ delay_seconds | int }}"
+                  - service: light.turn_on
+                    target:
+                      entity_id: light.yn360_led_video_light_d0_32_34_39_74_49
+                    data:
+                      brightness_pct: "{{ brightness_pct }}"
+                      color_temp_kelvin: "{{ color_temp_kelvin }}"
+                  - delay:
+                      seconds: "{{ delay_seconds | int }}"
+              - conditions:
+                  - condition: template
+                    value_template: "{{ repeat.index == (total_rounds | int) }}"
+                sequence:
+                  - service: light.turn_off
+                    target:
+                      entity_id: light.yn360_led_video_light_d0_32_34_39_6d_6f
+                  - delay:
+                      seconds: "{{ delay_seconds | int }}"
+                  - service: light.turn_off
+                    target:
+                      entity_id: light.yn360_led_video_light_db_b9_85_86_42_60
+                  - delay:
+                      seconds: "{{ delay_seconds | int }}"
+                  - service: light.turn_off
+                    target:
+                      entity_id: light.yn360_led_video_light_d0_32_34_39_74_49
+                  - delay:
+                      seconds: "{{ delay_seconds | int }}"

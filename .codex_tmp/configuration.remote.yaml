@@ -10,6 +10,16 @@ automation: !include automations.yaml
 script: !include scripts.yaml
 scene: !include scenes.yaml
 
+input_number:
+  yongnuo_serial_delay_seconds:
+    name: Yongnuo serial delay seconds
+    min: 10
+    max: 60
+    step: 1
+    mode: box
+    unit_of_measurement: s
+    initial: 30
+
 logger:
   default: info
   logs:

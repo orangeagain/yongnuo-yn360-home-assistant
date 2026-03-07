@@ -21,6 +21,7 @@ from .const import (
     CONF_MODEL,
     DATA_BLE_DISPATCHER,
     DEFAULT_IDLE_DISCONNECT_SECONDS,
+    DEFAULT_WAKE_DELAY_SECONDS,
     DOMAIN,
     MAX_COLOR_TEMP_CHANNEL,
     MAX_COLOR_TEMP_KELVIN,
@@ -263,7 +264,7 @@ class YongnuoLight(LightEntity, RestoreEntity):
                 new_color_temp_kelvin,
                 brightness_pct,
                 wake_before=not self._is_on and not self._profile.supports_rgb,
-                wake_delay_seconds=0.5,
+                wake_delay_seconds=DEFAULT_WAKE_DELAY_SECONDS,
             )
         else:
             r, g, b = new_rgb_color
