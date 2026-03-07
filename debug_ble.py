@@ -9,6 +9,7 @@ Usage:
   python debug_ble.py probe ADDRESS     # Try command types A0-AF interactively
   python debug_ble.py rainbow ADDRESS [FPS,FPS,...]  # Visual FPS test: find the real frame rate limit
   python debug_ble.py parallel ADDR,MODE,FPS [ADDR,MODE,FPS ...]  # Multi-light parallel test
+  python debug_ble.py sync [ADDR1 ADDR2 ...]  # Sync test: connect all lights, show CW/WW/RGB together
 
 Examples:
   python debug_ble.py scan
@@ -1495,6 +1496,193 @@ async def cmd_probe_wy_ct(address: str):
         print("Probe complete.")
 
 
+async def cmd_sync(addresses: list[str]):
+    """Sync test: connect to multiple lights simultaneously, show CW/WW/RGB together.
+
+    Auto-detects model by BLE device name to use the correct color temp channel:
+      - YN150WY -> channel 0x09
+      - YN150Ultra RGB -> channel 0x00
+      - YN360 (or unknown) -> channel 0x01
+    """
+
+    DEFAULT_ADDRS = [
+        "DB:B9:85:86:42:60",   # YN150Ultra RGB
+        "D0:32:34:39:6D:6F",   # YN150Ultra RGB
+        "D0:32:34:39:74:49",   # YN150WY
+    ]
+
+    if not addresses:
+        addresses = DEFAULT_ADDRS
+
+    def detect_model(name: str | None) -> tuple[str, int, bool]:
+        """Returns (model_name, ct_channel, has_rgb)."""
+        if not name:
+            return ("Unknown (YN360?)", 0x01, True)
+        n = name.upper()
+        if "WY" in n:
+            return ("YN150WY", 0x09, False)
+        if "150" in n:
+            return ("YN150Ultra RGB", 0x00, True)
+        return ("YN360", 0x01, True)
+
+    HOLD = 3.0  # seconds to hold each test phase
+
+    print(f"\nConnecting to {len(addresses)} lights...")
+    clients = []
+    lights = []
+
+    try:
+        for addr in addresses:
+            print(f"  {addr} ...", end="", flush=True)
+            client = BleakClient(addr, timeout=10.0)
+            await client.connect()
+            # Read device name from BLE
+            dev_name = None
+            try:
+                # Try reading GAP device name characteristic
+                name_bytes = await client.read_gatt_char("00002a00-0000-1000-8000-00805f9b34fb")
+                dev_name = name_bytes.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            model, ct_ch, has_rgb = detect_model(dev_name)
+            print(f" OK  name={dev_name!r}  model={model}  ct_ch=0x{ct_ch:02X}  rgb={has_rgb}")
+            clients.append(client)
+            lights.append({
+                "client": client,
+                "addr": addr,
+                "name": dev_name,
+                "model": model,
+                "ct_ch": ct_ch,
+                "has_rgb": has_rgb,
+            })
+
+        async def send_all(packets: list[tuple[dict, bytes]]):
+            """Send a packet to each light (list of (light, packet) pairs)."""
+            for light, packet in packets:
+                await light["client"].write_gatt_char(CHAR_CMD, packet, response=False)
+
+        async def send_all_same(packet: bytes):
+            """Send the same packet to all lights."""
+            for light in lights:
+                await light["client"].write_gatt_char(CHAR_CMD, packet, response=False)
+
+        rgb_lights = [l for l in lights if l["has_rgb"]]
+
+        # Print test plan
+        print()
+        print("=" * 64)
+        print("  Sync Test - All Lights Simultaneous")
+        print("=" * 64)
+        for i, l in enumerate(lights):
+            cap = "RGB + CT" if l["has_rgb"] else "CT only"
+            print(f"  {i+1}. {l['addr']}  {l['model']}  ({cap})")
+        print()
+        print(f"  Each phase holds {HOLD:.0f}s for visual observation.")
+        print("=" * 64)
+
+        # === Phase 0: Turn all on ===
+        print("\n--- Turning all lights ON ---")
+        await send_all_same(bytes([0xAE, 0xA1, 0xFF, 0xFF, 0xFF, 0x56]))
+        await asyncio.sleep(1.0)
+
+        # === Phase 1: Cool White Max ===
+        print("\n>>> Phase 1: Cool White Max (CW=99, WW=0) <<<")
+        await send_all([
+            (l, bytes([0xAE, 0xAA, l["ct_ch"], 0x63, 0x00, 0x56]))
+            for l in lights
+        ])
+        print(f"    Holding {HOLD:.0f}s...")
+        await asyncio.sleep(HOLD)
+
+        # === Phase 2: Warm White Max ===
+        print("\n>>> Phase 2: Warm White Max (CW=0, WW=99) <<<")
+        await send_all([
+            (l, bytes([0xAE, 0xAA, l["ct_ch"], 0x00, 0x63, 0x56]))
+            for l in lights
+        ])
+        print(f"    Holding {HOLD:.0f}s...")
+        await asyncio.sleep(HOLD)
+
+        # === Phase 3: Cool + Warm both 50% ===
+        print("\n>>> Phase 3: Mixed (CW=50, WW=50) <<<")
+        await send_all([
+            (l, bytes([0xAE, 0xAA, l["ct_ch"], 0x32, 0x32, 0x56]))
+            for l in lights
+        ])
+        print(f"    Holding {HOLD:.0f}s...")
+        await asyncio.sleep(HOLD)
+
+        # === Phase 4: Cross-fade cool -> warm ===
+        print("\n>>> Phase 4: Cross-fade Cool -> Warm (5 steps) <<<")
+        cross_steps = [(99, 0), (75, 25), (50, 50), (25, 75), (0, 99)]
+        for cw, ww in cross_steps:
+            print(f"    CW={cw:2d} WW={ww:2d}")
+            await send_all([
+                (l, bytes([0xAE, 0xAA, l["ct_ch"], cw, ww, 0x56]))
+                for l in lights
+            ])
+            await asyncio.sleep(2.0)
+
+        # === Phase 5-7: RGB (only for lights with RGB) ===
+        if rgb_lights:
+            print(f"\n>>> Phase 5: RED (RGB lights only, {len(rgb_lights)} lights) <<<")
+            for l in rgb_lights:
+                await l["client"].write_gatt_char(
+                    CHAR_CMD, bytes([0xAE, 0xA1, 0xFF, 0x00, 0x00, 0x56]), response=False)
+            print(f"    Holding {HOLD:.0f}s...")
+            await asyncio.sleep(HOLD)
+
+            print(f"\n>>> Phase 6: GREEN <<<")
+            for l in rgb_lights:
+                await l["client"].write_gatt_char(
+                    CHAR_CMD, bytes([0xAE, 0xA1, 0x00, 0xFF, 0x00, 0x56]), response=False)
+            print(f"    Holding {HOLD:.0f}s...")
+            await asyncio.sleep(HOLD)
+
+            print(f"\n>>> Phase 7: BLUE <<<")
+            for l in rgb_lights:
+                await l["client"].write_gatt_char(
+                    CHAR_CMD, bytes([0xAE, 0xA1, 0x00, 0x00, 0xFF, 0x56]), response=False)
+            print(f"    Holding {HOLD:.0f}s...")
+            await asyncio.sleep(HOLD)
+
+            # === Phase 8: Hue rotation on RGB lights ===
+            print(f"\n>>> Phase 8: Hue rotation (RGB lights) <<<")
+            hue_steps = [
+                (255, 0, 0, "red"),
+                (255, 128, 0, "orange"),
+                (255, 255, 0, "yellow"),
+                (0, 255, 0, "green"),
+                (0, 255, 255, "cyan"),
+                (0, 0, 255, "blue"),
+                (128, 0, 255, "violet"),
+                (255, 0, 255, "magenta"),
+            ]
+            for r, g, b, name in hue_steps:
+                print(f"    {name} ({r},{g},{b})")
+                for l in rgb_lights:
+                    await l["client"].write_gatt_char(
+                        CHAR_CMD, bytes([0xAE, 0xA1, r, g, b, 0x56]), response=False)
+                await asyncio.sleep(1.5)
+
+        # === Done ===
+        print("\n--- Turning all lights OFF ---")
+        await send_all_same(bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]))
+        print("\nSync test complete!")
+
+    finally:
+        print("  Disconnecting...")
+        for client in clients:
+            try:
+                if client.is_connected:
+                    await client.write_gatt_char(
+                        CHAR_CMD, bytes([0xAE, 0xA3, 0x00, 0x00, 0x00, 0x56]), response=False)
+                    await client.disconnect()
+            except Exception:
+                pass
+        print("  Done.")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -1612,6 +1800,9 @@ def main():
                 sys.exit(1)
             lights_config.append((addr, mode, int(fps_str)))
         asyncio.run(cmd_parallel(lights_config))
+    elif command == "sync":
+        addrs = sys.argv[2:] if len(sys.argv) > 2 else []
+        asyncio.run(cmd_sync(addrs))
     else:
         print(f"Unknown command: {command}")
         print(__doc__)
