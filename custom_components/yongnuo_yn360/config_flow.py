@@ -1,23 +1,20 @@
-import re
-
 from homeassistant import config_entries
-import voluptuous as vol
 from homeassistant.components.bluetooth import async_discovered_service_info
 from homeassistant.helpers import selector
+import voluptuous as vol
 
-from .const import DOMAIN
+from .const import CONF_ADDRESS, CONF_MODEL, DOMAIN
+from .models import (
+    get_discovery_name,
+    get_discovery_info_for_address,
+    get_model_profile,
+    guess_model_from_discovery_info,
+    is_likely_yongnuo_name,
+)
 
-# 已知 YN360 服务 UUID；其余型号不一定一致，所以不能只靠 UUID 过滤
 YONGNUO_SERVICE_UUIDS = {
     "f000aa60-0451-4000-b000-000000000000",
 }
-
-# 命名规则：YN + 型号数字（例如 YN100 / YN150 / YN150Ultra RGB / YN150WY）
-YONGNUO_NAME_PATTERNS = (
-    re.compile(r"^YN\d+", re.IGNORECASE),
-    re.compile(r"^YONGNUO", re.IGNORECASE),
-)
-
 
 class YongnuoYn360ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
@@ -31,53 +28,71 @@ class YongnuoYn360ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if service_uuids & YONGNUO_SERVICE_UUIDS:
                 return True
 
-        name = (info.name or "").strip()
-        return any(pattern.match(name) for pattern in YONGNUO_NAME_PATTERNS)
+        return is_likely_yongnuo_name(get_discovery_name(info))
+
+    @staticmethod
+    def _format_device_label(info) -> str:
+        name = get_discovery_name(info) or "Unknown"
+        profile = get_model_profile(guess_model_from_discovery_info(info))
+        return f"{name} [{profile.label}] ({info.address})"
 
     async def async_step_user(self, user_input=None):
         errors = {}
 
         if user_input is not None:
-            address = user_input["address"].strip().upper()
+            address = user_input[CONF_ADDRESS].strip().upper()
+            discovery_info = get_discovery_info_for_address(self.hass, address)
+            detected_model = None
+            if discovery_info is not None and get_discovery_name(discovery_info):
+                detected_model = guess_model_from_discovery_info(discovery_info)
+
             await self.async_set_unique_id(address)
             self._abort_if_unique_id_configured()
 
+            data = {
+                CONF_ADDRESS: address,
+            }
+            title = f"YONGNUO light ({address})"
+            if detected_model:
+                profile = get_model_profile(detected_model)
+                data[CONF_MODEL] = profile.key
+                title = f"{profile.label} ({address})"
+
             return self.async_create_entry(
-                title=f"YONGNUO Light ({address})",
-                data={"address": address},
+                title=title,
+                data=data,
             )
 
-        discovered_infos = async_discovered_service_info(self.hass)
-        devices = {
-            info.address: f"{info.name or 'Unknown'} ({info.address})"
-            for info in discovered_infos
+        discovered_infos = [
+            info
+            for info in async_discovered_service_info(self.hass)
             if self._is_likely_yongnuo_device(info)
-        }
+        ]
 
-        # 即使自动发现不到，也允许手动输入 MAC 地址（兼容 YN100/YN150 等）
-        if devices:
-            options = [{"label": name, "value": address} for address, name in devices.items()]
-            schema = vol.Schema(
-                {
-                    vol.Required("address"): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=options,
-                            translation_key="address",
-                            mode="dropdown",
-                            custom_value=True,
-                        )
-                    )
-                }
+        discovered_infos.sort(key=lambda info: (get_discovery_name(info) or "", info.address))
+
+        if discovered_infos:
+            address_selector = selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        {"label": self._format_device_label(info), "value": info.address}
+                        for info in discovered_infos
+                    ],
+                    mode="dropdown",
+                    custom_value=True,
+                )
             )
         else:
             errors["base"] = "no_devices_found"
-            schema = vol.Schema(
-                {
-                    vol.Required("address"): selector.TextSelector(
-                        selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-                    )
-                }
+            address_selector = selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADDRESS): address_selector,
+            }
+        )
 
         return self.async_show_form(
             step_id="user",

@@ -1,20 +1,22 @@
-# YONGNUO YN360 LED video light custom component for Home Assistant
+# YONGNUO LED light custom component for Home Assistant
 
-Control your YN360 LED video lights directly from Home Assistant.
+Control YONGNUO YN360, YN150, and YN150RGB LED lights directly from Home Assistant.
 
-The YN360 is a Bluetooth LE device, thus it is necessary to be in proximity of a Bluetooth radio attached to Home Assistant (either directly or by ESP32 Bluetooth proxy).
+These lights use Bluetooth LE, so Home Assistant needs a nearby Bluetooth radio (either directly attached or through an ESP32 Bluetooth proxy).
 
 ## Installation
 Copy contents of custom_components/yongnuo_yn360/ to custom_components/yongnuo_yn360/ in your Home Assistant config folder.
 
 ## Installation using HACS
-HACS is a community store for Home Assistant. Add this repository to HACS and install "YONGNUO YN360 LED video light" from there.
+HACS is a community store for Home Assistant. Add this repository to HACS and install "YONGNUO LED light" from there.
 
 ## Features
 
 - Power on/off
-- RGB color control
+- RGB color control on YN360 and YN150RGB
+- Color temperature control on YN360, YN150, and YN150RGB
 - Full config flow with auto-discovery
+- Manual model selection per device during setup
 - Persistent BLE connection per light (low latency for repeated updates)
 - High-speed command coalescing (only latest command is kept)
 - Multi-light support (add one config entry per light)
@@ -49,6 +51,7 @@ In short:
 ## Multi-light behavior
 
 Run "Add Integration" repeatedly and select/enter each light MAC address.
+Choose the correct model profile for each light when prompted.
 Each configured address becomes an independent Home Assistant light entity.
 
 For setups like 3 lights:

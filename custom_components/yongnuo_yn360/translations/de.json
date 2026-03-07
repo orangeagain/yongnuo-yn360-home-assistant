@@ -1,20 +1,20 @@
 {
-  "title": "YONGNUO YN360 LED-Videoleuchte",
+  "title": "YONGNUO LED-Leuchte",
   "config": {
     "step": {
       "user": {
-        "title": "Wähle deine YN360 LED-Videoleuchte",
-        "description": "Wähle ein verfügbares Gerät aus.",
+        "title": "YONGNUO-Leuchte hinzufuegen",
+        "description": "Waehle die Geraeteadresse aus. Das Modell wird, wenn moeglich, automatisch aus dem Bluetooth-Namen erkannt.",
         "data": {
-          "address": "Geräte"
+          "address": "Geraet"
         }
       }
     },
     "error": {
-      "no_devices_found": "Keine kompatiblen YN360 LED-Videoleuchten gefunden."
+      "no_devices_found": "Keine kompatiblen YONGNUO-Leuchten gefunden. Du kannst die Bluetooth-Adresse trotzdem manuell eingeben."
     },
     "abort": {
-      "already_configured": "Dieses Gerät ist bereits konfiguriert."
+      "already_configured": "Diese Leuchte ist bereits konfiguriert."
     }
   }
 }

@@ -1,7 +1,7 @@
 {
   "domain": "yongnuo_yn360",
-  "name": "YONGNUO YN360 LED video light",
-  "version": "1.0.1",
+  "name": "YONGNUO LED light",
+  "version": "1.1.0",
   "documentation": "https://github.com/singularity0821/yongnuo-yn360-home-assistant",
   "requirements": [],
   "codeowners": ["@singularity0821"],

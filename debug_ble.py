@@ -1518,8 +1518,8 @@ async def cmd_sync(addresses: list[str]):
         """Returns (model_name, ct_channel, has_rgb)."""
         if not name:
             return ("Unknown (YN360?)", 0x01, True)
-        n = name.upper()
-        if "WY" in n:
+        n = "".join(ch for ch in name.upper() if ch.isalnum())
+        if "150" in n and "WY" in n:
             return ("YN150WY", 0x09, False)
         if "150" in n:
             return ("YN150Ultra RGB", 0x00, True)
