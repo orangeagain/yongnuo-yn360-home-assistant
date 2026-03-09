@@ -15,6 +15,7 @@ HACS is a community store for Home Assistant. Add this repository to HACS and in
 - Power on/off
 - RGB color control on YN360 and YN150RGB
 - Color temperature control on YN360, YN150, and YN150RGB
+- Home Assistant color temperature range exposed as `3200-5600K`
 - Full config flow with auto-discovery
 - Manual model selection per device during setup
 - Persistent BLE connection per light (low latency for repeated updates)
